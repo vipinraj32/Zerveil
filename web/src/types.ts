@@ -1,0 +1,1027 @@
+// Mirrors the pydantic models in src/zerveil/models.py. Money is always a decimal string.
+
+export type Role = "advertiser" | "influencer";
+
+export interface RateCard {
+  fixed_min: string;
+  cpm_min: string;
+  preferred_fixed: string;
+}
+
+export interface ChannelInfo {
+  channel_id: string;
+  title: string;
+  subscribers: number;
+  thumbnail_url: string;
+  verified_at: string;
+  view_count: number | null;
+  video_count: number | null;
+  subscribers_hidden: boolean;
+}
+
+export interface User {
+  id: string;
+  email: string;
+  name: string;
+  picture: string;
+  role: Role;
+  created_at: string;
+  zcash_address: string; // shielded Unified Address ("" if unset): payout address (creator) or refund address (advertiser)
+  company: string;
+  brand_handle: string;
+  channel: ChannelInfo | null;
+  niche: string;
+  niches: string[];
+  niche_source: "" | "youtube_analysis" | "manual";
+  niche_analysis: NicheAnalysis | null;
+  rate_card: RateCard | null;
+  persona: string;
+  agent_active: boolean;
+  agent_signer: string;
+  delegation: string;
+  delegation_signature: string;
+}
+
+export interface Me {
+  user: User;
+  is_admin: boolean;
+  profile_complete: boolean;
+  agent_url?: string;
+  agent_listed?: boolean;
+}
+
+export interface ZcashInfo {
+  network: "testnet" | "mainnet" | "regtest";
+  ticker: "TAZ" | "ZEC";
+  wallet_backend: "simulated" | "zallet";
+  confirmations_required: number;
+  fee_reserve_per_deal: string;
+  payout_approval_required: boolean;
+  /** "" = no explorer links; otherwise a template with "{txid}" or a prefix to append the txid to. */
+  explorer_tx_url: string;
+}
+
+export interface PlatformStatus {
+  app_name: string;
+  payment_mode: "simulated" | "zcash";
+  payments_simulated: boolean;
+  zcash: ZcashInfo;
+  premium_search_price: string;
+  verifier_online: boolean;
+  login_configured: boolean;
+  llm: string | null;
+  store: string;
+  clock_offset_hours: number;
+  now: string;
+  warnings: string[];
+}
+
+export interface DirectoryEntry {
+  id: string;
+  name: string;
+  channel_id: string;
+  subscribers: number;
+  niche: string;
+  niches: string[];
+  avatar_url: string;
+  agent_url: string;
+}
+
+export interface NicheSuggestion {
+  niche: string;
+  score: number;
+  video_share: number;
+  matched_videos: number;
+  keywords: string[];
+  examples: string[];
+  channel_signal: boolean;
+  llm_confidence: number | null;
+  reason: string;
+}
+
+export interface NicheAnalysis {
+  channel_id: string;
+  analyzed_at: string;
+  videos_analyzed: number;
+  method: "rules" | "llm+rules";
+  suggestions: NicheSuggestion[];
+  note: string;
+}
+
+export interface CampaignSpec {
+  id: string;
+  name: string; // the advertiser's own label ("" on campaigns from before names); never shown to creators
+  advertiser: string;
+  brand_handle: string;
+  niche: string;
+  budget: string;
+  max_creators: number;
+  min_subscribers: number;
+  max_subscribers: number;
+  max_fixed: string;
+  max_cpm: string;
+  cap_per_creator: string;
+  deliverable: string;
+  publish_within_days: number;
+  required_tags: string[];
+  brief: string;
+  min_duration_seconds: number;
+  max_duration_seconds: number;
+  requirements: string;
+  content_checks: ContentCheck[];
+  owner_id: string;
+  refund_address: string;
+  compensation_model: CompensationModel;
+  scope: ContentScope;
+  category: string;
+  jurisdictions: string[];
+  disclosure_policies: string[];
+  max_rounds: number;
+  review_required: boolean;
+  agent_policy_version: number;
+}
+
+export type CompensationModel = "fixed" | "cpm" | "hybrid";
+
+export interface ContentScope {
+  usage_rights: "organic_only" | "brand_repost" | "paid_ads";
+  license_days: number;
+  paid_amplification: boolean;
+  exclusivity_days: number;
+  exclusivity_category: string;
+  revisions: number;
+  deliverable_count: number;
+}
+
+export type CampaignStatus = "planning" | "negotiating" | "awaiting_approval" | "funding" | "active" | "done" | "failed";
+
+export interface Campaign {
+  spec: CampaignSpec;
+  status: CampaignStatus;
+  created_at: string;
+  error: string;
+}
+
+/** The budget is a spending limit, not money held: reserved = caps of deals being or already paid. */
+export interface FundingSummary {
+  budget: string;
+  reserved: string;
+  funded: string;
+  remaining: string;
+}
+
+export interface PendingApproval {
+  campaign_id: string;
+  deals: string[];
+  total: string;
+  invoice_amount: string;
+  network: string;
+  fee_reserve_per_deal: string;
+}
+
+export interface CampaignDetail extends Campaign {
+  pending_approval: PendingApproval | null;
+  funding_invoices: PaymentRequest[];
+  funding: FundingSummary;
+}
+
+// ---- shielded Zcash payments (src/zerveil/payments) ------------------------------------
+
+export type InvoicePurpose = "campaign_funding" | "api_access" | "credit_topup" | "payment_link";
+export type InvoiceStatus = "pending" | "underpaid" | "confirming" | "paid" | "expired" | "late_payment" | "cancelled";
+
+/** An invoice as the payer sees it (public). */
+export interface PaymentRequest {
+  id: string;
+  purpose: InvoicePurpose;
+  title: string;
+  description: string;
+  amount: string;
+  network: string;
+  address: string;
+  memo: string;
+  status: InvoiceStatus;
+  received: string;
+  confirmations: number;
+  required_confirmations: number;
+  simulated: boolean;
+  created_at: string;
+  expires_at: string;
+  paid_at: string | null;
+  ticker: string;
+  zip321_uri: string;
+  pay_url: string;
+  payee_name?: string;
+}
+
+export interface InvoiceNote {
+  key: string;
+  txid: string;
+  pool: string;
+  output_index: number;
+  amount: string;
+  confirmations: number;
+  memo_matched: boolean;
+  first_seen_at: string;
+}
+
+export interface PaymentEvent {
+  at: string;
+  invoice_id: string | null;
+  payout_id: string | null;
+  kind: string;
+  detail: Record<string, unknown>;
+}
+
+/** The owner's view of an invoice. */
+export interface OwnerInvoice extends PaymentRequest {
+  notes: InvoiceNote[];
+  campaign_id: string | null;
+  deal_ids: string[];
+  scope: string;
+  paid_via: string;
+  consumed_at: string | null;
+  events?: PaymentEvent[];
+}
+
+export type PayoutStatus = "pending_approval" | "approved" | "sending" | "submitted" | "sent" | "confirmed" | "failed" | "rejected" | "unknown";
+
+export interface PayoutRequest {
+  id: string;
+  kind: "fixed" | "performance" | "refund" | "link_forward";
+  to_address: string;
+  amount: string;
+  memo: string;
+  beneficiary_id: string;
+  campaign_id: string | null;
+  deal_id: string | null;
+  invoice_id: string | null;
+  reason: string;
+  evidence_hash?: string;
+  status: PayoutStatus;
+  approvals: { by: string; approved: boolean; note: string; at: string }[];
+  operation_id: string | null;
+  txid: string | null;
+  confirmations: number;
+  error: string;
+  attempts: number;
+  simulated: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WalletStatus {
+  backend: string;
+  network: string;
+  simulated: boolean;
+  reachable: boolean;
+  detail: string;
+  your_address: string;
+  escrow_balance?: string | null;
+}
+
+export interface SpendingPolicy {
+  enabled: boolean;
+  max_per_request: string;
+  max_daily: string;
+  max_campaign_budget: string;
+  allowed_categories: string[];
+  approval_above: string;
+}
+
+export interface CreditEntry {
+  id: string;
+  user_id: string;
+  amount: string;
+  kind: "topup" | "spend";
+  ref: string;
+  category: string;
+  simulated: boolean;
+  at: string;
+}
+
+export interface SpendRequest {
+  id: string;
+  user_id: string;
+  invoice_id: string;
+  category: string;
+  amount: string;
+  reason: string;
+  status: string;
+  created_at: string;
+  decided_at: string | null;
+}
+
+export interface CreditSummary {
+  balance: string;
+  spent_24h: string;
+  entries: CreditEntry[];
+  pending_requests: SpendRequest[];
+}
+
+export interface PremiumResult {
+  id: string;
+  name: string;
+  channel_id: string;
+  niches: string[];
+  subscribers: number;
+  channel_views: number | null;
+  videos: number | null;
+  stats_verified_at: string | null;
+  zerveil_deals_completed: number;
+  proofs_accepted_first_try: number;
+  agent_url: string;
+}
+
+export interface PremiumSearchResult {
+  niche: string;
+  paid_with: string;
+  results: PremiumResult[];
+}
+
+export type PaymentChallenge = Pick<
+  PaymentRequest,
+  "id" | "network" | "ticker" | "amount" | "address" | "memo" | "zip321_uri" | "pay_url" | "expires_at" | "status" | "confirmations" | "required_confirmations" | "simulated"
+>;
+
+export interface PaymentRequired {
+  error: "payment_required";
+  detail: string;
+  payment: PaymentChallenge;
+  retry_with_header: Record<string, string>;
+}
+
+export interface AgentPremiumSearch {
+  invoice: OwnerInvoice | null;
+  payment: { status: "paid" | "pending_approval" | "refused"; reason: string; request_id?: string };
+  results?: PremiumResult[];
+}
+
+export interface Custody {
+  wallet: { backend: string; network: string; simulated: boolean; reachable: boolean; escrow_balance: string | null; detail: string; warnings: string[] };
+  received_total: string;
+  paid_out_total: string;
+  queued_payouts_total: string;
+  expected_balance_before_fees: string;
+  note: string;
+}
+
+export type DealState =
+  | "NEGOTIATING"
+  | "REJECTED"
+  | "ESCALATED"
+  | "AGREED"
+  | "AWAITING_APPROVAL"
+  | "BLOCKED"
+  | "AWAITING_FUNDING"
+  | "FUNDING"
+  | "FUNDED"
+  | "PAYMENT_EXPIRED"
+  | "PROOF_SUBMITTED"
+  | "PROOF_REJECTED"
+  | "VERIFIED"
+  | "FIXED_RELEASED"
+  | "DISPUTED"
+  | "COMPLETED"
+  | "EXPIRED_REFUNDED"
+  | "ARCHIVED";
+
+export interface Offer {
+  deal_id: string;
+  campaign_id: string;
+  round: number;
+  proposer: "advertiser" | "influencer";
+  max_rounds: number;
+  compensation_model: CompensationModel;
+  scope: ContentScope;
+  category: string;
+  disclosure_policies: string[];
+  pricing_version: string;
+  fixed_fee: string;
+  cpm: string;
+  cap: string;
+  deliverable: string;
+  publish_within_days: number;
+  required_tags: string[];
+  min_duration_seconds: number;
+  max_duration_seconds: number;
+  requirements_hash: string;
+  note: string;
+}
+
+export interface Round {
+  offer: Offer;
+  reply: { kind: ReplyKind; reason: string; decided_by?: string; counter: Offer | null };
+}
+
+export type ReplyKind = "counter" | "accept" | "reject" | "clarify" | "escalate";
+
+export interface DealTerms {
+  deal_id: string;
+  campaign_id: string;
+  advertiser: string;
+  influencer_id: string;
+  channel_id: string;
+  payee: string; // the creator's shielded Unified Address (redacted for advertisers)
+  asset: string;
+  network: string;
+  compensation_model: CompensationModel;
+  pricing_version: string;
+  scope: ContentScope;
+  disclosure_policies: string[];
+  fixed_fee: string;
+  cpm: string;
+  cap: string;
+  deliverable: string;
+  publish_by: string;
+  required_tags: string[];
+  min_duration_seconds: number;
+  max_duration_seconds: number;
+  requirements_hash: string;
+  min_live_hours: number;
+  views_measured_after_days: number;
+  review_window_hours: number;
+  influencer_signature: string;
+}
+
+export interface ProofCheck {
+  name: string;
+  passed: boolean;
+  detail: string;
+}
+
+export interface ContentCheck {
+  id: string;
+  kind: "spoken_mention" | "logo_visible";
+  phrase: string;
+  aliases: string[];
+  min_count: number;
+  max_count: number | null;
+  description: string;
+}
+
+export interface ContentResult {
+  check_id: string;
+  kind: string;
+  requirement: string;
+  status: "pass" | "fail" | "unverified";
+  method: "captions" | "vision" | "none";
+  decisive: boolean;
+  observed: Record<string, unknown>;
+  evidence: string[];
+  detail: string;
+}
+
+export interface ContentReport {
+  video_id: string;
+  analyzed_at: string;
+  transcript: "manual_captions" | "auto_captions" | "unavailable";
+  transcript_language: string;
+  transcript_note: string;
+  frames: string[];
+  vision: "llm" | "unavailable";
+  results: ContentResult[];
+}
+
+export interface ProofReview {
+  decided_by: "verifier" | "advertiser";
+  explained_by: "rules" | "llm";
+  summary: string;
+  issues: { check: string; problem: string; fix: string; fixable: boolean }[];
+  can_resubmit: boolean;
+  resubmit_by: string | null;
+  at: string;
+}
+
+export interface Proof {
+  video_id: string;
+  submitted_at: string;
+  checks: ProofCheck[];
+  published_at: string | null;
+  views: number | null;
+  attestations: Record<string, boolean>;
+  attempt: number;
+  review: ProofReview | null;
+  content: ContentReport | null;
+}
+
+/** A payout decided for a deal by deterministic code; its delivery status lives in the PayoutRequest. */
+export interface Payout {
+  payout_id: string;
+  kind: "fixed" | "performance" | "refund";
+  to: string;
+  amount: string;
+  at: string;
+  views: number | null;
+  evidence_hash: string;
+  simulated: boolean;
+}
+
+export interface Deal {
+  id: string;
+  campaign_id: string;
+  influencer_id: string;
+  state: DealState;
+  rounds: Round[];
+  negotiation_outcome: string;
+  terms: DealTerms | null;
+  approved_terms_hash: string | null;
+  approvals: Approval[];
+  agreed_at: string | null;
+  funding_invoice_id: string | null;
+  funded_at: string | null;
+  funding_simulated: boolean;
+  proof: Proof | null;
+  proof_history: Proof[];
+  payouts: Payout[];
+  archived_reason: string;
+  fixed_release_due: string | null;
+  performance_due: string | null;
+  policy_violations: string[];
+  updated_at: string | null;
+  /** Only on GET /api/deals/{id}. */
+  payout_requests?: PayoutRequest[];
+  funding_invoice?: PaymentRequest | null;
+}
+
+export interface InfluencerDeal extends Deal {
+  campaign: Pick<
+    CampaignSpec,
+    "advertiser" | "brand_handle" | "niche" | "deliverable" | "brief" | "required_tags" | "requirements" | "min_duration_seconds" | "max_duration_seconds" | "content_checks"
+  >;
+}
+
+export interface AuditEvent {
+  at: string;
+  campaign_id: string;
+  deal_id: string | null;
+  actor: string;
+  kind: string;
+  detail: Record<string, unknown>;
+}
+
+export type SessionStatus = "QUEUED" | "RUNNING" | "AGREED" | "REJECTED" | "TIMED_OUT" | "FAILED" | "CANCELLED";
+
+export interface SessionOffer {
+  fixed_fee: string;
+  cpm: string;
+  cap: string;
+  round: number;
+  proposer?: "advertiser" | "influencer";
+}
+
+/** One creator's place in a campaign's negotiation queue. negotiation_id is the deal id. */
+export interface NegotiationSession {
+  negotiation_id: string;
+  campaign_id: string;
+  creator_id: string;
+  position: number;
+  status: SessionStatus;
+  outcome: string | null;
+  current_round: number;
+  maximum_rounds: number;
+  initial_offer: SessionOffer | null;
+  latest_offer: SessionOffer | null;
+  final_offer: SessionOffer | null;
+  started_at: string | null;
+  completed_at: string | null;
+  failure_reason: string;
+}
+
+export interface NegotiationProgress {
+  campaign_id: string;
+  total_creators: number;
+  completed_count: number;
+  agreed_count: number;
+  rejected_count: number;
+  failed_count: number;
+  cancelled_count: number;
+  queued_count: number;
+  current_creator_id: string | null;
+  current_negotiation_id: string | null;
+  workflow_status: "starting" | "running" | "completed" | "cancelled" | "failed";
+  agreed_spend: string;
+  proposed_spend: string;
+}
+
+export interface LiveEvent {
+  type: "audit" | "deal" | "campaign" | "negotiation" | "negotiation_progress" | "invoice" | "payout";
+  campaign_id?: string;
+  invoice_id?: string;
+  payout_id?: string;
+  deal_id?: string | null;
+  kind?: string;
+  state?: DealState;
+  status?: CampaignStatus;
+  event?: NegotiationEvent; // type "negotiation": the transcript event itself
+  progress?: NegotiationProgress; // type "negotiation_progress"
+}
+
+export interface CampaignInput {
+  name: string;
+  advertiser: string;
+  brand_handle: string;
+  niche: string;
+  budget: string;
+  max_creators: number;
+  min_subscribers: number;
+  max_subscribers: number;
+  max_fixed: string;
+  max_cpm: string;
+  cap_per_creator: string;
+  publish_within_days: number;
+  brief: string;
+  deliverable: Deliverable;
+  min_duration_seconds: number;
+  max_duration_seconds: number;
+  requirements: string;
+  content_checks: ContentCheck[];
+  compensation_model: CompensationModel;
+  scope: ContentScope;
+  category: string;
+  jurisdictions: string[];
+  max_rounds: number;
+  review_required: boolean;
+  required_tags: string[];
+}
+
+export type Deliverable = "youtube_short" | "youtube_video";
+
+export interface Approval {
+  kind: "payment" | "compliance_review";
+  by: string;
+  approved: boolean;
+  terms_hash: string;
+  note: string;
+  at: string;
+}
+
+// ---- configurable agents (src/zerveil/agent_policy) -------------------------------------
+
+export type InfluencerGoal = "maximize_earnings" | "guaranteed_income" | "brand_fit" | "long_term_partnership" | "minimize_workload";
+export type AdvertiserGoal = "minimize_cost" | "maximize_reach" | "maximize_roi" | "audience_relevance" | "evidence_quality" | "speed_to_close";
+
+export interface InfluencerPolicy {
+  role: "influencer";
+  version: number;
+  updated_at: string | null;
+  objective: { primary: InfluencerGoal; weights: Partial<Record<InfluencerGoal, number>> };
+  hard: {
+    min_fixed_fee: string;
+    min_cpm: string;
+    accepted_models: CompensationModel[];
+    min_turnaround_days: number;
+    max_revisions: number;
+    allow_paid_amplification: boolean;
+    max_license_days: number;
+    allow_exclusivity: boolean;
+    max_exclusivity_days: number;
+    forbidden_categories: string[];
+    require_brief: boolean;
+  };
+  preferences: {
+    preferred_fixed_fee: string;
+    preferred_cpm: string | null;
+    preferred_categories: string[];
+    brand_fit_discount_pct: string;
+    expected_views: number | null;
+    min_acceptable_score: number;
+    escalate_instead_of_reject: boolean;
+    premiums: {
+      paid_amplification_pct: string;
+      exclusivity_pct_per_30_days: string;
+      license_pct_per_30_days: string;
+      rush_pct: string;
+      rush_days: number;
+      extra_revision_fee: string;
+    };
+  };
+  creator: { audience_countries: string[]; content_languages: string[]; bio: string };
+  disclosure: { preferred_label: string; jurisdictions: string[] };
+  persona: string;
+}
+
+export interface AdvertiserPolicy {
+  role: "advertiser";
+  version: number;
+  updated_at: string | null;
+  objective: { primary: AdvertiserGoal; weights: Partial<Record<AdvertiserGoal, number>> };
+  hard: { min_verified_subscribers: number; require_verified_channel: boolean; blocked_niches: string[] };
+  preferences: {
+    opening_fixed_pct: string;
+    opening_cpm_pct: string;
+    concession_pct: string;
+    escalate_fixed_above: string | null;
+    min_acceptable_score: number;
+    fit_premium_pct: string;
+  };
+  persona: string;
+}
+
+export type AgentPolicy = InfluencerPolicy | AdvertiserPolicy;
+
+export interface PolicyResponse<P extends AgentPolicy = AgentPolicy> {
+  policy: P | null;
+  is_default: boolean;
+  material_changes?: string[];
+}
+
+export type DecisionAction = "ACCEPT" | "COUNTEROFFER" | "REJECT" | "REQUEST_CLARIFICATION" | "ESCALATE_TO_HUMAN";
+
+export interface DecisionRecord {
+  id: string;
+  deal_id: string;
+  campaign_id: string;
+  party: "advertiser" | "influencer";
+  round: number;
+  objective: string;
+  hard_checks: ProofCheck[];
+  preferences_applied: string[];
+  scores: Record<string, number>;
+  score: number | null;
+  action: DecisionAction;
+  public_explanation: string;
+  private_rationale: string;
+  decided_by: string;
+  llm_suggestion: Record<string, string> | null;
+  llm_overridden: string[];
+  policy_version: number;
+  pricing_version: string;
+  offer_id: string;
+  response_offer_id: string | null;
+  at: string;
+}
+
+export interface EvidenceItem {
+  metric: string;
+  value: unknown;
+  source: "youtube_data_api" | "self_reported" | "derived_estimate" | "unavailable";
+  verified: boolean;
+  observed_at: string | null;
+  limitations: string;
+}
+
+export interface PriceExample {
+  model: CompensationModel;
+  fixed: string;
+  performance: string;
+  uncapped_total: string;
+  total: string;
+  capped: boolean;
+  eligible_views: number;
+  version: string;
+}
+
+type Amounts = { fixed_fee: string; cpm: string; cap: string };
+type Moved = { fixed_fee: string; cpm: string };
+
+export interface NegotiationView {
+  deal_id: string;
+  status: "open" | "agreed" | "failed" | "escalated" | "agreed_then_cancelled";
+  outcome: string;
+  max_rounds: number;
+  rounds_used: number;
+  rounds_remaining: number;
+  compensation_model: CompensationModel;
+  scope: ContentScope;
+  rounds: {
+    round: number;
+    advertiser_offer: Amounts | null;
+    advertiser_moved: Moved | null;
+    reply: ReplyKind;
+    explanation: string;
+    counter: Amounts | null;
+    creator_moved: Moved | null;
+  }[];
+  payable: { model: CompensationModel; views_to_cap: number | null; examples: PriceExample[] } | null;
+  agreement: { terms: DealTerms; terms_hash: string; approved_terms_hash: string | null; approvals: Approval[] } | null;
+}
+
+export interface DisclosurePolicy {
+  id: string;
+  jurisdiction: string;
+  version: number;
+  effective_from: string;
+  sources: string[];
+  approved_labels: string[];
+  discouraged_labels: string[];
+  placement_chars: number;
+  in_video_required: boolean;
+  livestream_rule: string;
+  notes: string;
+  disclaimer: string;
+}
+
+export interface ComplianceView {
+  campaign_id: string;
+  jurisdictions: string[];
+  required_tags: string[];
+  review_required: boolean;
+  policies: DisclosurePolicy[];
+  disclaimer: string;
+  settlement_simulated: boolean;
+  deals: {
+    deal_id: string;
+    influencer_id: string;
+    state: DealState;
+    disclosure_policies: string[];
+    checks: ProofCheck[];
+    attestations: Record<string, boolean>;
+    review: "not_required" | "pending" | "approved" | "rejected";
+    payment_approval: Approval | null;
+    terms_hash: string;
+    terms_hash_matches_approval: boolean;
+    gates: string[];
+    funding_simulated: boolean;
+  }[];
+}
+
+export interface ChannelDetails {
+  channel_id: string;
+  title: string;
+  handle: string;
+  description: string;
+  country: string | null;
+  published_at: string | null;
+  thumbnail_url: string;
+  banner_url: string;
+  subscribers: number | null;
+  total_views: number | null;
+  video_count: number | null;
+  topics: string[];
+  keywords: string;
+  observed_at: string;
+  url: string;
+}
+
+export interface VideoStats {
+  video_id: string;
+  title: string;
+  published_at: string;
+  thumbnail_url: string;
+  duration_seconds: number | null;
+  privacy_status: string;
+  views: number | null;
+  likes: number | null;
+  comments: number | null;
+  engagement_rate: number | null;
+  observed_at: string;
+  url: string;
+}
+
+export interface EngagementSummary {
+  sample_size: number;
+  median_views: number | null;
+  mean_views: number | null;
+  mean_engagement_rate: number | null;
+  engagement_sample: number;
+  uploads_per_week: number | null;
+  window_days: number | null;
+  limitations: string;
+}
+
+export interface CreatorProfileView {
+  influencer: {
+    id: string;
+    name: string;
+    avatar_url: string;
+    niche: string;
+    niches: string[];
+    niche_source: string;
+    niche_analysis: NicheAnalysis | null;
+    agent_signer: string;
+    agent_active: boolean;
+    listed: boolean;
+    agent_url: string | null;
+    member_since: string;
+  };
+  verified_channel: { channel_id: string; title: string; subscribers: number; subscribers_hidden: boolean; verified_at: string } | null;
+  public_profile: {
+    accepted_models: string[];
+    creator: { audience_countries: string[]; content_languages: string[]; bio: string };
+    disclosure_label: string;
+    source: string;
+  } | null;
+  evidence: EvidenceItem[];
+  youtube: { available: boolean; error: string | null; channel: ChannelDetails | null; recent_videos: VideoStats[]; engagement: EngagementSummary | null };
+  deals: {
+    deal_id: string;
+    campaign_id: string;
+    campaign: string;
+    state: DealState;
+    terms: { compensation_model: string; fixed_fee: string; cpm: string; cap: string; publish_by: string } | null;
+    video_id: string | null;
+    views: number | null;
+    paid: string;
+    updated_at: string | null;
+  }[];
+}
+
+export type NegotiationEventType =
+  | "negotiation_started"
+  | "agent_thinking"
+  | "message_completed"
+  | "offer_created"
+  | "counter_offer_created"
+  | "negotiation_agreed"
+  | "negotiation_rejected"
+  | "negotiation_timeout"
+  | "negotiation_error"
+  | "negotiation_completed"
+  | "negotiation_legacy";
+
+/** One persisted transcript event from /api/negotiations/{id}/stream; event_id orders and de-duplicates them. */
+export interface NegotiationEvent {
+  event_id: number;
+  negotiation_id: string;
+  campaign_id: string;
+  event_type: NegotiationEventType;
+  agent_role: "advertiser" | "influencer" | "system";
+  agent_id: string;
+  agent_name: string;
+  message_id: string | null;
+  round: number | null;
+  timestamp: string;
+  content: string;
+  offer: { fixed_fee: string; cpm: string; cap: string; round: number } | null;
+  reply?: ReplyKind;
+  /** Advertiser messages: what the message does with the offer it carries. Absent on transcripts from before it existed. */
+  intent?: "offer" | "counter" | "accept";
+  outcome?: "agreed" | "rejected" | "timeout" | "escalated" | "cancelled" | "error";
+  max_rounds?: number;
+  compensation_model?: CompensationModel;
+  terms?: { fixed_fee: string; cpm: string; cap: string; publish_by: string; deliverable: string };
+  terms_hash?: string;
+  error?: string;
+}
+
+export type FeedbackCategory =
+  | "accepted_too_quickly"
+  | "rejected_reasonable_offer"
+  | "poor_negotiation"
+  | "ignored_requirements"
+  | "exceeded_budget"
+  | "unrealistic_counteroffer"
+  | "misunderstood_other_party"
+  | "good_agreement"
+  | "other";
+
+export interface FeedbackRatings {
+  effectiveness: number | null;
+  offer_quality: number | null;
+  communication: number | null;
+  respected_requirements: number | null;
+  outcome: number | null;
+}
+
+export interface FeedbackInput {
+  rating: number;
+  category: FeedbackCategory;
+  ratings: FeedbackRatings;
+  what_went_wrong: string;
+  do_differently: string;
+  suggested_response: string;
+  suggested_offer: { fixed_fee: string; cpm: string } | null;
+  comments: string;
+  message_id: string | null;
+}
+
+export interface NegotiationFeedback extends FeedbackInput {
+  id: string;
+  deal_id: string;
+  party: "advertiser" | "influencer";
+  category_label: string;
+  target: { message_id: string; round: number | null; content: string } | null;
+  signal: { outcome: string; suggested_offer_within_limits: boolean };
+  created_at: string;
+  lesson_id: string | null;
+}
+
+export interface AgentLesson {
+  id: string;
+  role: "advertiser" | "influencer";
+  status: "pending" | "approved" | "dismissed";
+  category: FeedbackCategory;
+  negative: boolean;
+  guidance: string;
+  deal_id: string;
+  context: { niche: string; compensation_model: string };
+  created_at: string;
+  reviewed_at: string | null;
+}
+
+export interface AgentPerformance {
+  role: "advertiser" | "influencer";
+  total: number;
+  outcomes: Record<string, number>;
+  agreement_rate: number | null;
+  rejection_rate: number | null;
+  avg_rounds: number | null;
+  avg_price_move: number | null;
+  price_move_basis: string;
+  price_move_samples: number;
+  satisfaction: number | null;
+  feedback_count: number;
+  trend: { week: string; negotiations: number; agreement_rate: number | null; avg_rating: number | null; feedback: number }[];
+  common_mistakes: { category: FeedbackCategory; label: string; count: number }[];
+}

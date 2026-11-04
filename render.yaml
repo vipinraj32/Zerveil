@@ -1,0 +1,60 @@
+# Render Blueprint (Dashboard → New → Blueprint, pick this repo). One Docker web service; the database is your
+# existing Render PostgreSQL (paste its Internal Database URL into DATABASE_URL).
+# Deploys come from GitHub Actions (.github/workflows/ci.yml) after lint, tests and the image smoke test pass, through
+# the service's deploy hook, so Render's own auto-deploy is off. Values marked sync: false are entered in the dashboard
+# and never live in git.
+services:
+  - type: web
+    name: zerveil
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /healthz
+    autoDeployTrigger: "off"
+    envVars:
+      # required
+      - key: PUBLIC_BASE_URL # https://<service>.onrender.com, also the Google OAuth redirect base
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: GOOGLE_OAUTH_CLIENT_ID
+        sync: false
+      - key: GOOGLE_OAUTH_CLIENT_SECRET
+        sync: false
+      - key: YOUTUBE_API_KEY
+        sync: false
+      - key: ADMIN_EMAILS # Google accounts that approve payouts
+        sync: false
+      # payments: simulated (no ZEC moves) | zcash (real wallet over JSON-RPC; see README "Zcash wallet")
+      - key: PAYMENT_MODE
+        value: simulated
+      - key: ZCASH_NETWORK
+        value: testnet
+      - key: PAYOUT_APPROVAL_REQUIRED
+        value: "true"
+      # optional
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: MCP_API_TOKEN
+        sync: false
+      - key: LANGSMITH_TRACING
+        value: "false"
+      - key: LANGSMITH_API_KEY
+        sync: false
+      # PAYMENT_MODE=zcash only. The wallet RPC must be reachable privately (e.g. a private service or tunnel), never
+      # exposed to the public internet.
+      - key: ZCASH_WALLET_RPC_URL
+        sync: false
+      - key: ZCASH_WALLET_RPC_USER
+        sync: false
+      - key: ZCASH_WALLET_RPC_PASSWORD
+        sync: false
+      - key: ZCASH_ESCROW_ACCOUNT
+        sync: false
+      - key: ZCASH_ESCROW_FROM_ADDRESS
+        sync: false
+      - key: ZCASH_EXPLORER_TX_URL
+        sync: false

@@ -1,0 +1,194 @@
+/* Sign-in page, styled to match the landing page. Colours come from the brand tokens in styles.css. */
+
+.auth {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+  min-height: 100vh;
+  font-family: var(--font);
+}
+
+.auth-side {
+  position: relative;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--blue) 14%, var(--paper));
+}
+.auth-side img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center top;
+}
+/* the logo is part of the picture, so its area links home */
+.auth-logo-link {
+  position: absolute;
+  left: 30%;
+  right: 30%;
+  top: 10%;
+  height: 10%;
+}
+.auth-tag {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  margin: 0;
+  padding: 4px 12px;
+  border-radius: 99px;
+  background: rgb(11 10 26 / 70%);
+  color: var(--paper);
+  font-size: var(--fs-xs);
+}
+
+.auth-main {
+  position: relative;
+  display: grid;
+  place-items: center;
+  padding: 48px 24px;
+  background: var(--bg);
+}
+.auth-back {
+  align-self: flex-start;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: var(--fs-small);
+  font-weight: 600;
+}
+.auth-back:hover {
+  color: var(--accent);
+  text-decoration: none;
+}
+.auth-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  max-width: 440px;
+  padding: 40px 36px;
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow:
+    0 2px 6px rgb(11 10 26 / 6%),
+    0 30px 60px -30px rgb(11 10 26 / 35%);
+  animation: auth-in 0.5s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+@keyframes auth-in {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .auth-card {
+    animation: none;
+  }
+}
+.auth-card h2 {
+  font-size: var(--fs-h4);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+.auth-sub {
+  margin: -6px 0 6px;
+  color: var(--muted);
+}
+.auth-google {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 54px;
+  margin-top: 6px;
+  border-radius: 8px;
+  background: var(--orange);
+  color: var(--paper);
+  font-size: var(--fs-p);
+  font-weight: 700;
+  box-shadow: 0 12px 24px -14px var(--orange);
+  transition:
+    background 0.2s,
+    transform 0.2s,
+    box-shadow 0.2s;
+}
+.auth-google:hover {
+  text-decoration: none;
+  background: color-mix(in srgb, var(--orange) 88%, var(--ink));
+}
+.auth-g {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+  background: var(--paper);
+}
+.auth-switch {
+  margin-top: 4px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  color: var(--accent);
+  font-size: var(--fs-small);
+  font-weight: 600;
+  text-align: center;
+}
+.auth-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-small);
+  text-align: center;
+}
+
+@media (max-width: 860px) {
+  .auth {
+    grid-template-columns: 1fr;
+  }
+  .auth-side {
+    height: 420px;
+  }
+  .auth-main {
+    padding: 40px 16px;
+  }
+  .auth-card {
+    padding: 28px 20px;
+  }
+}
+
+/* brand panel (replaces the old screenshot) */
+.auth-side {
+  background:
+    radial-gradient(120% 80% at 0% 0%, rgb(139 92 246 / 35%), transparent 60%),
+    radial-gradient(90% 70% at 100% 100%, rgb(34 211 238 / 22%), transparent 60%),
+    var(--ink);
+}
+.auth-brand {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1.75rem;
+  height: 100%;
+  padding: 48px clamp(24px, 6vw, 72px);
+  color: var(--paper);
+}
+.auth-headline {
+  margin: 0;
+  font-family: "Plus Jakarta Sans", var(--font);
+  font-size: clamp(2rem, 3.6vw, 3rem);
+  font-weight: 800;
+  line-height: 1.08;
+  letter-spacing: -0.02em;
+}
+.auth-headline span {
+  background: linear-gradient(90deg, var(--violet), var(--cyan));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.auth-points {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: 0.6rem;
+  color: color-mix(in srgb, var(--paper) 80%, var(--ink));
+  line-height: 1.45;
+}

@@ -1,0 +1,92 @@
+import { Link, Navigate, useSearchParams } from "react-router";
+import { api } from "../api";
+import { Logo } from "../components/Logo";
+import { Notice } from "../components/ui";
+import { useSession } from "../session";
+import "./login.css";
+
+type Role = "advertiser" | "influencer";
+
+// The landing page picks the role: "Launch a Campaign" → ?as=advertiser, "Join as a Creator" → ?as=influencer.
+const ROLES: Record<Role, { title: string; sub: string; note: string; other: Role; otherLabel: string }> = {
+  advertiser: {
+    title: "Sign in as an advertiser",
+    sub: "Run campaigns and let your agent negotiate.",
+    note: "Next you’ll add a shielded Zcash refund address (Unified Address). No browser wallet needed.",
+    other: "influencer",
+    otherLabel: "Are you a creator? Join as a creator",
+  },
+  influencer: {
+    title: "Join as a creator",
+    sub: "Get sponsored. Your agent negotiates for you.",
+    note: "Google will also ask for read-only YouTube access to prove you own your channel. Then you add a shielded Zcash payout address.",
+    other: "advertiser",
+    otherLabel: "Running a campaign? Sign in as an advertiser",
+  },
+};
+
+export function Login() {
+  const { me, status } = useSession();
+  const [params] = useSearchParams();
+  const error = params.get("error");
+  const role: Role = params.get("as") === "influencer" ? "influencer" : "advertiser";
+  if (me) return <Navigate to="/app" replace />;
+  const current = ROLES[role];
+
+  return (
+    <div className="auth">
+      <aside className="auth-side">
+        <div className="auth-brand">
+          <Link to="/" aria-label="Zerveil home">
+            <Logo size={40} tone="dark" />
+          </Link>
+          <p className="auth-headline">
+            Private Payments.
+            <br />
+            <span>Autonomous Agents.</span>
+          </p>
+          <ul className="auth-points">
+            <li>AI agents negotiate sponsorships within your limits.</li>
+            <li>Deterministic code decides; the LLM only proposes.</li>
+            <li>Campaigns are funded with shielded Zcash; creators are paid privately after verified posts.</li>
+          </ul>
+        </div>
+        <p className="auth-tag">Zcash testnet · TAZ has no monetary value</p>
+      </aside>
+
+      <main className="auth-main">
+        <div className="auth-card">
+          <Link to="/" className="auth-back">
+            ← Back to home
+          </Link>
+          <h2>{current.title}</h2>
+          <p className="auth-sub">{current.sub}</p>
+          {error && <Notice tone="bad">{error}</Notice>}
+          {status && !status.login_configured && <Notice tone="warn">Google sign-in isn’t configured on the server yet.</Notice>}
+
+          <a className="auth-google" href={api.loginUrl(role)}>
+            <GoogleMark /> Continue with Google
+          </a>
+          <p className="auth-note">{current.note}</p>
+          <Link className="auth-switch" to={`/login?as=${current.other}`} replace>
+            {current.otherLabel}
+          </Link>
+        </div>
+      </main>
+    </div>
+  );
+}
+
+/** Google's own mark, kept in Google's brand colours as their sign-in guidelines require. */
+function GoogleMark() {
+  return (
+    <span className="auth-g" aria-hidden>
+      <svg width="18" height="18" viewBox="0 0 48 48">
+        <path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z" />
+        <path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z" />
+        <path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z" />
+        <path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z" />
+      </svg>
+    </span>
+  );
+}

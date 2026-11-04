@@ -1,0 +1,27 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets — OAuth/session secrets, wallet RPC credentials, any key material
+.env
+.env.*
+!.env.example
+keys/
+*.pem
+
+# Built web app (cd web && npm run build)
+src/zerveil/api/static/
+
+# design references (third-party screenshots and assets, not ours to redistribute)
+Reference UI/
+
+# local notes that are not part of the project
+AGENTS.md
+conversation-*.txt
