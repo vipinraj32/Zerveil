@@ -40,7 +40,7 @@ export function ReceivingAccountPanel({ onChange }: { onChange?: (view: Receivin
       ? "This looks like a seed phrase. Never paste your seed phrase anywhere — only a viewing key."
       : looksLikeSpendingKey(key)
         ? "This looks like a spending key. Never paste a spending key — only a viewing key."
-        : !key.startsWith(prefix)
+        : !key.startsWith(prefix) && !(status?.payments_simulated && key.startsWith("sim:"))
           ? `A ${testnet ? "testnet " : ""}Unified Full Viewing Key starts with ${prefix}…`
           : null;
   const height = Number(birthday);
