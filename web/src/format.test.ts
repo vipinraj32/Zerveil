@@ -37,14 +37,14 @@ describe("business values vs the payment asset", () => {
     expect(termsText({ fixed_fee: "19", cpm: "2.5", cap: "40" }, "hybrid", "USD")).toBe("$19.00 fixed + $2.50 CPM, cap $40.00");
   });
 
-  it("legacy TAZ-priced records are never shown as dollars", () => {
-    expect(money("40", "TAZ")).toBe("40.00 TAZ (legacy test units)");
-    expect(money("40", "TAZ")).not.toContain("$");
+  it("campaigns from before USD pricing are shown in $ too, never with TAZ", () => {
+    expect(money("40", "TAZ")).toBe("$40.00");
+    expect(termsText({ fixed_fee: "3", cpm: "0", cap: "3" }, "fixed", "TAZ")).toBe("$3.00 fixed");
   });
 
   it("a payment request's value is its USD amount; the asset amount stays native", () => {
     expect(requestValue({ usd_amount: "20.00", amount: "0.20000000", asset: "TAZ" })).toBe("$20.00");
-    expect(requestValue({ usd_amount: null, amount: "0.5", asset: "TAZ" })).toBe("0.50 TAZ (legacy)");
+    expect(requestValue({ usd_amount: null, amount: "0.5", asset: "TAZ" })).toBe("$0.50");
     expect(formatAsset("0.20000000", "TAZ")).toBe("0.20 TAZ");
     expect(formatAsset("0.00050000", "TAZ")).toBe("0.0005 TAZ");
     expect(sumAsset(["0.1", "0.2"])).toBe("0.30000000");

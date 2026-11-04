@@ -24,7 +24,7 @@ const PIPELINE: { label: string; states: DealState[]; tone: string }[] = [
 ];
 
 // Amounts are summed as decimal strings in integer cents (no float accumulation). They are in the campaign's currency:
-// USD, or legacy test units on old campaigns (kept out of the USD totals).
+// Every campaign is shown in $, including closed campaigns created before USD pricing.
 const confirmedAmounts = (d: Deal) => [
   ...(d.milestones ?? []).filter((m) => m.status === "confirmed").map((m) => m.amount),
   ...d.payouts.filter((p) => p.kind !== "refund").map((p) => p.amount), // legacy history of archived deals
@@ -61,8 +61,8 @@ export function AdvertiserHome() {
   for (const d of allDeals) byCampaign.set(d.campaign_id, [...(byCampaign.get(d.campaign_id) ?? []), d]);
 
   // USD totals cover USD campaigns only; legacy campaigns (priced in test units) are counted separately
-  const usdCampaigns = new Set(list.filter((c) => isUsd(c.spec.currency)).map((c) => c.spec.id));
-  const legacyCount = list.length - usdCampaigns.size;
+  const usdCampaigns = new Set(list.map((c) => c.spec.id)); // every campaign is shown in $, including ones from before USD pricing
+  const legacyCount = 0;
   const usdDeals = allDeals.filter((d) => usdCampaigns.has(d.campaign_id));
   const budget = sumUsd(list.filter((c) => usdCampaigns.has(c.spec.id)).map((c) => c.spec.budget));
   const paid = sumUsd(usdDeals.flatMap(confirmedAmounts));
@@ -397,7 +397,7 @@ function CampaignRow({ campaign: c, deals }: { campaign: Campaign; deals: Deal[]
           </span>
         </span>
         {!isUsd(cur) && <span className="muted small">{LEGACY_PRICING_NOTE}</span>}
-        {c.error && <span className="error small">{c.error}</span>}
+        {c.error && isUsd(cur) && <span className="error small">{c.error}</span>}
       </Link>
     </li>
   );

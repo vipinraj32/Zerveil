@@ -8,7 +8,7 @@ import { Link } from "react-router";
 import { api } from "../../api";
 import { InvoiceStatusChip, PricingNotice, PrivacyNote, ShieldedCheckout, SimulatedChip, TestnetNotice, WalletStatusPanel } from "../../components/Payments";
 import { ActionButton, Card, Empty, ErrorText, Notice, Spinner, Stat, UsdInput } from "../../components/ui";
-import { LEGACY_ASSET, PURPOSE_LABEL, formatAsset, formatUsd, humanize, num, requestValue, toCents, when } from "../../format";
+import { PURPOSE_LABEL, formatAsset, formatUsd, humanize, num, requestValue, toCents, when } from "../../format";
 import { useLiveEvents, useResource } from "../../live";
 import { useSession } from "../../session";
 import type { AgentPremiumSearch, CreditEntry, OwnerInvoice, PaymentRequired, PremiumSearchResult, SpendingPolicy } from "../../types";
@@ -272,7 +272,8 @@ function creditAmount(e: CreditEntry, legacyUntil: string): string {
   const neg = e.amount.trim().startsWith("-");
   const abs = neg ? e.amount.trim().slice(1) : e.amount;
   const sign = neg ? "−" : "+";
-  return legacy ? `${sign}${formatAsset(abs, LEGACY_ASSET)} (legacy)` : `${sign}${formatUsd(abs)}`;
+  void legacy;
+  return `${sign}${formatUsd(abs)}`;
 }
 
 function SpendingLimits() {

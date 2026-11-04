@@ -282,7 +282,7 @@ USD_PRICING = """
 UPDATE campaigns SET data = jsonb_set(data, '{spec,currency}', '"TAZ"') WHERE data->'spec'->>'currency' IS NULL;
 UPDATE campaigns
    SET data = data || jsonb_build_object('status', 'failed', 'negotiation_cancelled', true,
-                                         'error', 'Closed when Zerveil moved to USD pricing: this campaign''s amounts were TAZ test units, not USD.')
+                                         'error', 'Closed when Zerveil moved to USD pricing.')
  WHERE data->'spec'->>'currency' = 'TAZ' AND data->>'status' NOT IN ('done', 'failed');
 UPDATE deals
    SET state = 'ARCHIVED',

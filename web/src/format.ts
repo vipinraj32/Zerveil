@@ -98,23 +98,21 @@ export const LEGACY_ASSET = "TAZ";
 /** Matches an amount in legacy units inside an agent transcript line ("19 TAZ fixed …"), for transcripts from before USD pricing. */
 export const LEGACY_AMOUNT_RE = /\d (TAZ|ZEC)\b/;
 
-export const LEGACY_PRICING_NOTE = "Legacy — priced in TAZ before USD pricing";
+export const LEGACY_PRICING_NOTE = "Closed when Zerveil moved to USD pricing";
 
 /** The currency of a deal's terms and milestones: "USD", or "TAZ" for terms signed before USD pricing (currency missing). */
 export const termsCurrency = (terms: { currency?: string | null } | null | undefined): string => terms?.currency || (terms ? "TAZ" : "USD");
 
-/** A campaign/deal amount in its currency: "$40.00", or "40.00 TAZ (legacy test units)" for
- * amounts from before USD pricing — never with a $ sign. */
-export function money(v: string | number | null | undefined, currency: string | null | undefined = "USD", short = false): string {
-  if (isUsd(currency)) return formatUsd(v, short);
-  const a = formatAsset(v, currency || "TAZ");
-  return a === "—" ? a : `${a} (${short ? "legacy" : "legacy test units"})`;
+/** A campaign/deal amount: always "$40.00". Campaigns from before USD pricing are shown in $ too: their numbers were
+ * test amounts with no monetary value, and the owner chose to read them as dollars. `currency` is kept for callers. */
+export function money(v: string | number | null | undefined, _currency: string | null | undefined = "USD", short = false): string {
+  return formatUsd(v, short);
 }
 
 /** The value a payment request asks for: USD when priced in USD, otherwise (legacy) the asset amount. */
 export function requestValue(r: { usd_amount?: string | null; amount: string; asset?: string | null; ticker?: string }, short = false): string {
   if (r.usd_amount !== null && r.usd_amount !== undefined) return formatUsd(r.usd_amount, short);
-  return `${formatAsset(r.amount, r.asset || r.ticker)} (legacy)`;
+  return formatUsd(r.amount, short); // before USD pricing the request's number was the deal value itself
 }
 
 /** "Prices in USD · paid in shielded Zcash (testnet) at a test rate · no stablecoin" */
@@ -257,10 +255,10 @@ export function docSize(text: string): { words: number; pages: number } {
 
 export const MODEL_LABEL: Record<string, string> = { fixed: "Fixed fee", cpm: "CPM only", hybrid: "Fixed + CPM" };
 
-/** "$19.00 fixed + $2.50 CPM, cap $40.00" for any compensation model (legacy TAZ terms are labeled legacy). */
-export function termsText(t: { fixed_fee: string; cpm: string; cap: string }, model = "hybrid", currency: string | null | undefined = "USD"): string {
-  const m = (v: string) => (isUsd(currency) ? usd(v) : formatAsset(v, currency || "TAZ"));
-  const legacy = isUsd(currency) ? "" : " (legacy)";
+/** "$19.00 fixed + $2.50 CPM, cap $40.00" for any compensation model (terms from before USD pricing too). */
+export function termsText(t: { fixed_fee: string; cpm: string; cap: string }, model = "hybrid", _currency: string | null | undefined = "USD"): string {
+  const m = (v: string) => usd(v);
+  const legacy = "";
   if (model === "fixed") return `${m(t.fixed_fee)} fixed${legacy}`;
   if (model === "cpm") return `${m(t.cpm)} CPM, cap ${m(t.cap)}${legacy}`;
   return `${m(t.fixed_fee)} fixed + ${m(t.cpm)} CPM, cap ${m(t.cap)}${legacy}`;

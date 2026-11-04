@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
-import { DELIVERABLE_LABEL, LEGACY_AMOUNT_RE, MODEL_LABEL, isUsd, money, termsCurrency, termsText } from "../format";
+import { DELIVERABLE_LABEL, LEGACY_AMOUNT_RE, MODEL_LABEL, money, termsCurrency, termsText } from "../format";
 import { summarize, useNegotiationStream } from "../negotiation";
 import type { CompensationModel, Deal, FeedbackCategory, FeedbackInput, FeedbackRatings, NegotiationEvent, NegotiationFeedback } from "../types";
 import { A2AChat } from "./CampaignPanels";
@@ -520,7 +520,7 @@ function FeedbackPanel({
         </label>
         <div className="ln-offer-inputs">
           <label className="ln-field">
-            <span>Fixed fee ({isUsd(currency) ? "$" : "legacy units"})</span>
+            <span>Fixed fee ($)</span>
             <input
               inputMode="decimal"
               value={form.suggested_offer?.fixed_fee ?? ""}
@@ -538,7 +538,7 @@ function FeedbackPanel({
             />
           </label>
           <label className="ln-field">
-            <span>Per 1,000 views ({isUsd(currency) ? "$" : "legacy units"})</span>
+            <span>Per 1,000 views ($)</span>
             <input
               inputMode="decimal"
               value={form.suggested_offer?.cpm ?? ""}

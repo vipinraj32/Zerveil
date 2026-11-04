@@ -65,7 +65,7 @@ export function Receipts() {
                       {r.title}
                       <div className="muted small">{PURPOSE_LABEL[r.purpose] ?? r.purpose}</div>
                     </td>
-                    <td>{isLegacy(r) ? `${formatAsset(r.received || r.amount, assetOf(r))} (legacy)` : formatUsd(r.usd_amount)}</td>
+                    <td>{formatUsd(isLegacy(r) ? r.amount : r.usd_amount)}</td>
                     <td className="small">{r.recipient_id === user.id ? "Received" : r.payer_id === user.id ? "Paid" : "—"}</td>
                     <td>{r.confirmations}</td>
                     <td className="small">{when(r.issued_at)}</td>

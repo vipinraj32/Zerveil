@@ -411,10 +411,10 @@ export function CampaignView() {
 
       {!isUsd(cur) && (
         <Notice tone="warn">
-          <strong>{LEGACY_PRICING_NOTE}.</strong> This campaign's amounts are legacy test units, not dollars.
+          <strong>{LEGACY_PRICING_NOTE}.</strong> It was created before USD pricing and is closed.
         </Notice>
       )}
-      {c.error && <Notice tone="bad">{c.error}</Notice>}
+      {c.error && isUsd(cur) && <Notice tone="bad">{c.error}</Notice>}
       {c.pending_approval && <ApprovalPanel campaign={c} deals={list} names={names} onDone={reloadAll} />}
       {!c.pending_approval && payments.data && <CampaignPaymentsSection data={payments.data} deals={list} name={creatorName} onChange={reloadAll} />}
       {payments.error && <ErrorText error={payments.error} />}
