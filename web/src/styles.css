@@ -1622,3 +1622,88 @@ label.check input {
   display: grid;
   gap: 0.25rem;
 }
+
+/* ---- money: USD inputs ($ … USD) and the "prices in USD, paid in shielded TAZ" breakdown ---- */
+
+.money-input {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.money-input:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+.money-input > input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.money-input > input:focus {
+  outline: none;
+}
+.money-affix {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 0.6rem;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: var(--fs-small);
+  background: var(--surface-2);
+}
+.pay-breakdown {
+  margin: 0;
+}
+.pricing-note {
+  margin: 0;
+}
+.wallet-sends {
+  margin: 0.15rem 0 0;
+}
+/* The technical block under a payment's USD value: what the wallet actually sends (testnet asset, test rate). */
+.test-payment {
+  padding: 0.55rem 0.75rem;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+.test-payment-label {
+  font-size: var(--fs-small);
+  font-weight: 700;
+  color: var(--warn);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.test-payment-line {
+  margin: 0.2rem 0 0;
+  font-size: var(--fs-small);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+/* Money values stay on one line ("$1,250.00") and line up in tables and stats. */
+.money,
+.checkout-amount,
+.kpi-value,
+.stat-value,
+.pay-tx td {
+  font-variant-numeric: tabular-nums;
+}
+.money,
+.checkout-amount {
+  white-space: nowrap;
+}
+.checkout-amount span {
+  white-space: normal;
+}
+.pay-details > summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+.pay-details[open] > summary {
+  margin-bottom: 0.5rem;
+}

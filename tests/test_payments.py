@@ -28,6 +28,9 @@ from zerveil.zcash.wallet import ReceivedNote, WalletUnavailable
 
 
 def settings(**over) -> Settings:
+    """The state-machine tests price at a test rate of $1 per TAZ so their amounts read the same in USD and TAZ; the
+    USD → TAZ conversion itself is tested at the default rate in test_usd_pricing.py."""
+    over.setdefault("zcash_test_usd_rate", Decimal("1"))
     return Settings(_env_file=None, database_url="", anthropic_api_key="", youtube_api_key="", session_secret="s", **over)
 
 
@@ -77,7 +80,8 @@ async def new_deal(svc: DealService, influencer, n: int, *, gate: bool = True, f
     offer = Offer(deal_id=did, campaign_id=spec.id, round=1, fixed_fee=Decimal(fixed), cpm=Decimal("2.5"), cap=spec.cap_per_creator,
                   deliverable="youtube_short", publish_within_days=7, required_tags=["#ad"])  # fmt: skip
     terms = sign_terms(AGENT_KEY, DealTerms(deal_id=did, campaign_id=spec.id, advertiser=spec.advertiser, influencer_id=influencer.id,
-                                            channel_id=influencer.channel_id, payee=influencer.payout_address, fixed_fee=offer.fixed_fee,
+                                            channel_id=influencer.channel_id, payee=influencer.payout_address, currency="USD", asset="TAZ",
+                                            fixed_fee=offer.fixed_fee,
                                             cpm=offer.cpm, cap=offer.cap, deliverable=offer.deliverable,
                                             publish_by=ctx.clock.now() + timedelta(days=7), required_tags=["#ad"]))  # fmt: skip
     deal = await svc.save(Deal(id=did, campaign_id=spec.id, influencer_id=influencer.id, terms=terms, agreed_at=ctx.clock.now()), DealState.AGREED)
@@ -320,7 +324,7 @@ async def test_accepting_requests_the_fixed_fee_straight_to_the_creator(svc, inf
     assert deal.state == DealState.CONTENT_CREATION and m.status == "confirmed" and m.receipt_id and deal.payment_simulated
     assert (await svc.campaign("CMP-test")).status == "active"
     summary = await svc.payment_summary("CMP-test")
-    assert summary["paid"] == "20" and summary["requested"] == "0"
+    assert summary["currency"] == "USD" and summary["paid"] == "20.00" and summary["requested"] == "0.00"
 
 
 async def test_one_invoice_per_creator(svc, influencer):

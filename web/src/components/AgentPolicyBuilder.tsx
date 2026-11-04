@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { ApiError, api } from "../api";
 import { humanize, when } from "../format";
 import type { AdvertiserGoal, AdvertiserPolicy, AgentPolicy, CompensationModel, InfluencerGoal, InfluencerPolicy } from "../types";
-import { Card, ErrorText, Notice, Spinner } from "./ui";
+import { Card, ErrorText, Notice, Spinner, UsdInput } from "./ui";
 
 const INFLUENCER_GOALS: InfluencerGoal[] = ["maximize_earnings", "guaranteed_income", "brand_fit", "long_term_partnership", "minimize_workload"];
 const ADVERTISER_GOALS: AdvertiserGoal[] = ["maximize_roi", "minimize_cost", "maximize_reach", "audience_relevance", "evidence_quality", "speed_to_close"];
@@ -79,11 +79,11 @@ function InfluencerForm({ p, set }: { p: InfluencerPolicy; set: (p: InfluencerPo
 
       <Card title="2 · Hard constraints (never crossed)" className="policy-card">
         <div className="grid-3 form">
-          <Field label="Minimum fixed fee (TAZ)" hint="Raised automatically by your premiums below">
-            <input type="number" min="0" step="0.01" value={p.hard.min_fixed_fee} onChange={(e) => hard({ min_fixed_fee: e.target.value })} />
+          <Field label="Minimum fixed fee ($)" hint="Raised automatically by your premiums below">
+            <UsdInput type="number" min="0" step="0.01" value={p.hard.min_fixed_fee} onChange={(e) => hard({ min_fixed_fee: e.target.value })} />
           </Field>
-          <Field label="Minimum CPM (TAZ)">
-            <input type="number" min="0" step="0.01" value={p.hard.min_cpm} onChange={(e) => hard({ min_cpm: e.target.value })} />
+          <Field label="Minimum $ per 1,000 views">
+            <UsdInput type="number" min="0" step="0.01" value={p.hard.min_cpm} onChange={(e) => hard({ min_cpm: e.target.value })} />
           </Field>
           <Field label="Shortest publish window (days)">
             <input type="number" min={0} max={90} value={p.hard.min_turnaround_days} onChange={(e) => hard({ min_turnaround_days: Number(e.target.value) })} />
@@ -127,11 +127,11 @@ function InfluencerForm({ p, set }: { p: InfluencerPolicy; set: (p: InfluencerPo
 
       <Card title="3 · Flexible preferences" className="policy-card">
         <div className="grid-3 form">
-          <Field label="Opening ask, fixed (TAZ)">
-            <input type="number" min="0" step="0.01" value={p.preferences.preferred_fixed_fee} onChange={(e) => pref({ preferred_fixed_fee: e.target.value })} />
+          <Field label="Opening ask, fixed ($)">
+            <UsdInput type="number" min="0" step="0.01" value={p.preferences.preferred_fixed_fee} onChange={(e) => pref({ preferred_fixed_fee: e.target.value })} />
           </Field>
-          <Field label="Opening ask, CPM (TAZ)" hint="Empty = your minimum CPM">
-            <input type="number" min="0" step="0.01" value={p.preferences.preferred_cpm ?? ""} onChange={(e) => pref({ preferred_cpm: e.target.value || null })} />
+          <Field label="Opening ask, $ per 1,000 views" hint="Empty = your minimum CPM">
+            <UsdInput type="number" min="0" step="0.01" value={p.preferences.preferred_cpm ?? ""} onChange={(e) => pref({ preferred_cpm: e.target.value || null })} />
           </Field>
           <Field label="Expected views per Short" hint="Your own estimate, labelled as one">
             <input type="number" min={0} value={p.preferences.expected_views ?? ""} onChange={(e) => pref({ expected_views: e.target.value ? Number(e.target.value) : null })} />
@@ -168,8 +168,8 @@ function InfluencerForm({ p, set }: { p: InfluencerPolicy; set: (p: InfluencerPo
           <Field label="Rush threshold (days)">
             <input type="number" min={0} max={30} value={p.preferences.premiums.rush_days} onChange={(e) => prem({ rush_days: Number(e.target.value) })} />
           </Field>
-          <Field label="Extra revision fee (TAZ each)">
-            <input type="number" min={0} step="0.01" value={p.preferences.premiums.extra_revision_fee} onChange={(e) => prem({ extra_revision_fee: e.target.value })} />
+          <Field label="Extra revision fee ($ each)">
+            <UsdInput type="number" min={0} step="0.01" value={p.preferences.premiums.extra_revision_fee} onChange={(e) => prem({ extra_revision_fee: e.target.value })} />
           </Field>
         </div>
       </Card>
@@ -236,8 +236,8 @@ function AdvertiserForm({ p, set }: { p: AdvertiserPolicy; set: (p: AdvertiserPo
           <Field label="Concession per round (% of the gap)">
             <input type="number" min={1} max={100} value={p.preferences.concession_pct} onChange={(e) => pref({ concession_pct: e.target.value })} />
           </Field>
-          <Field label="Ask me above this fixed fee (TAZ)" hint="Empty = never escalate">
-            <input type="number" min="0" step="0.01" value={p.preferences.escalate_fixed_above ?? ""} onChange={(e) => pref({ escalate_fixed_above: e.target.value || null })} />
+          <Field label="Ask me above this fixed fee ($)" hint="Empty = never escalate">
+            <UsdInput type="number" min="0" step="0.01" value={p.preferences.escalate_fixed_above ?? ""} onChange={(e) => pref({ escalate_fixed_above: e.target.value || null })} />
           </Field>
           <Field label="Niche-fit premium (%)" hint="Concede faster for a niche match, within the ceilings">
             <input type="number" min={0} max={50} value={p.preferences.fit_premium_pct} onChange={(e) => pref({ fit_premium_pct: e.target.value })} />

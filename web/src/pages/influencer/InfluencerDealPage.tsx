@@ -12,8 +12,8 @@ import { ProofForm } from "../../components/ProofForm";
 import { RejectionDialog } from "../../components/RejectionDialog";
 import { Requirements } from "../../components/Requirements";
 import { Card, Notice, Spinner, StateBadge } from "../../components/ui";
-import { DEAL_GROUPS, NEEDS_PROOF, awaitingFor, dealGroup, latestOffer, receivedFor } from "../../creatorDeals";
-import { DELIVERABLE_LABEL, termsText, zec, videoLength, when } from "../../format";
+import { DEAL_GROUPS, NEEDS_PROOF, awaitingFor, dealCurrency, dealGroup, latestOffer, receivedFor } from "../../creatorDeals";
+import { DELIVERABLE_LABEL, LEGACY_PRICING_NOTE, isUsd, money, termsText, videoLength, when } from "../../format";
 import { useLiveEvents, useResource } from "../../live";
 import { useMe } from "../../session";
 import type { DealState, InfluencerDeal } from "../../types";
@@ -169,7 +169,7 @@ export function InfluencerDealPage() {
 
         <aside className="md-side">
           <Card title="Conversation">
-            <LiveNegotiation key={deal.id} deal={deal} viewer="influencer" creator={me.name} avatar={me.picture} brand={deal.terms?.advertiser ?? c.advertiser} />
+            <LiveNegotiation key={deal.id} deal={deal} viewer="influencer" creator={me.name} avatar={me.picture} brand={deal.terms?.advertiser ?? c.advertiser} currency={dealCurrency(deal)} />
             {deal.state === "NEGOTIATING" && (
               <p className="small muted">
                 Your agent decides within the limits on <Link to="/influencer/agent">My agent</Link>.
@@ -183,7 +183,7 @@ export function InfluencerDealPage() {
 }
 
 function paymentStatus(d: InfluencerDeal): string {
-  const sim = d.payment_simulated ? " (simulated, no ZEC moved)" : "";
+  const sim = d.payment_simulated ? " (simulated, no real payment)" : "";
   const fixed = d.milestones.find((m) => m.kind === "fixed");
   if (d.state === "ARCHIVED") return "Earlier payment system (history only)";
   if (d.state === "COMPLETED") return `Every milestone settled${sim}`;
@@ -201,6 +201,7 @@ function Pay({ deal }: { deal: InfluencerDeal }) {
   const t = deal.terms;
   const paid = receivedFor(deal);
   const awaiting = awaitingFor(deal);
+  const cur = dealCurrency(deal);
   return (
     <Card title="Pay">
       <dl className="kv">
@@ -208,7 +209,7 @@ function Pay({ deal }: { deal: InfluencerDeal }) {
           <>
             <dt>Latest offer</dt>
             <dd>
-              {termsText(offer, offer.compensation_model)}{" "}
+              {termsText(offer, offer.compensation_model, cur)}{" "}
               <span className="muted small">
                 round {offer.round}/{offer.max_rounds}, from {offer.proposer === "influencer" ? "your agent" : "the brand's agent"}
               </span>
@@ -219,7 +220,8 @@ function Pay({ deal }: { deal: InfluencerDeal }) {
           <>
             <dt>Agreed terms</dt>
             <dd>
-              <strong>{termsText(t, t.compensation_model)}</strong>
+              <strong>{termsText(t, t.compensation_model, cur)}</strong>
+              {!isUsd(cur) && <div className="muted small">{LEGACY_PRICING_NOTE}</div>}
             </dd>
           </>
         )}
@@ -230,11 +232,11 @@ function Pay({ deal }: { deal: InfluencerDeal }) {
           </>
         )}
         <dt>Confirmed in your wallet</dt>
-        <dd>{zec(paid)}</dd>
-        {awaiting > 0 && (
+        <dd>{money(paid, cur)}</dd>
+        {Number(awaiting) > 0 && (
           <>
             <dt>Requested, not yet confirmed</dt>
-            <dd>{zec(awaiting)}</dd>
+            <dd>{money(awaiting, cur)}</dd>
           </>
         )}
         <dt>Payment status</dt>

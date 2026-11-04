@@ -51,7 +51,7 @@ export function Login() {
             <li>Advertisers pay creators directly in shielded Zcash, wallet to wallet; Zerveil holds no funds.</li>
           </ul>
         </div>
-        <p className="auth-tag">Zcash testnet · TAZ has no monetary value</p>
+        <p className="auth-tag">Prices in USD · Zcash testnet · no real monetary value</p>
       </aside>
 
       <main className="auth-main">

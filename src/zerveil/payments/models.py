@@ -1,4 +1,5 @@
-"""Payment records. Amounts are Decimal ZEC (TAZ on testnet), serialized as strings.
+"""Payment records. Business amounts are USD; `Invoice.amount` / `Receipt.amount` are the payment asset (ZEC, TAZ on
+testnet). Decimals, serialized as strings.
 
 Zerveil holds no funds. An invoice asks a payer to send ZEC straight to a fresh address of the recipient's own
 wallet account; the view-only scanner reports what arrived there, and that is the only evidence of payment.
@@ -52,7 +53,15 @@ class Invoice(BaseModel):
     receiving_account_id: str = ""  # the ReceivingAccount the address belongs to
     title: str  # shown on the public payment page: no campaign terms
     description: str = ""
-    amount: Decimal
+    # Business value (USD) and what is actually paid (asset amount). The USD value is converted once, at creation, with
+    # the quote stored here; the scanner checks `amount`. Invoices from before USD pricing have usd_amount = None.
+    currency: str = ""  # "USD"; "" on legacy invoices priced directly in the asset
+    usd_amount: Decimal | None = None
+    asset: str = ""  # TAZ (testnet) | ZEC
+    usd_rate: Decimal | None = None  # USD per 1 asset unit used for this invoice
+    rate_source: str = ""
+    test_rate: bool = False  # the rate is a configured test rate, not a market price
+    amount: Decimal  # asset amount to pay (ZEC / TAZ)
     network: str
     address: str
     memo: str  # ZRV1:<id>, the only thing Zerveil asks the payer to put in the encrypted memo
@@ -90,7 +99,8 @@ class Invoice(BaseModel):
 
     def public(self) -> dict[str, Any]:
         """What anyone with the payment link sees: no transaction ids, no campaign or deal references."""
-        return self.model_dump(mode="json", include={"id", "purpose", "title", "description", "amount", "network", "address", "memo", "status",
+        return self.model_dump(mode="json", include={"id", "purpose", "title", "description", "currency", "usd_amount", "asset", "usd_rate",
+                                                     "rate_source", "test_rate", "amount", "network", "address", "memo", "status",
                                                      "received", "confirmations", "required_confirmations", "simulated", "created_at",
                                                      "expires_at", "paid_at"})  # fmt: skip
 
@@ -130,8 +140,8 @@ class Receipt(BaseModel):
     title: str
     payer_id: str
     recipient_id: str
-    amount: Decimal
-    received: Decimal
+    amount: Decimal  # asset amount requested
+    received: Decimal  # asset amount received
     network: str
     pools: list[str]
     txids: list[str]
@@ -143,15 +153,23 @@ class Receipt(BaseModel):
     milestone_id: str | None = None
     simulated: bool = False
     issued_at: datetime
+    # USD pricing (absent on receipts issued before it, so their hashes are unchanged)
+    currency: str | None = None
+    usd_amount: Decimal | None = None
+    asset: str | None = None
+    usd_rate: Decimal | None = None
+    rate_source: str | None = None
+    test_rate: bool | None = None
     receipt_hash: str = ""
 
     def compute_hash(self) -> str:
-        body = self.model_dump(mode="json", exclude={"receipt_hash", "confirmations"})
+        priced = ("currency", "usd_amount", "asset", "usd_rate", "rate_source", "test_rate")
+        body = self.model_dump(mode="json", exclude={"receipt_hash", "confirmations", *(f for f in priced if getattr(self, f) is None)})
         return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
 
 
 class SpendingPolicy(BaseModel):
-    """Limits on what the advertiser's AI agent may pay on its own, from the advertiser's prepaid API credit."""
+    """Limits (USD) on what the advertiser's AI agent may pay on its own, from the advertiser's prepaid API credit."""
 
     enabled: bool = True
     max_per_request: Decimal = Field(default=Decimal("0.1"), ge=0)
@@ -167,8 +185,8 @@ class CreditEntry(BaseModel):
 
     id: str
     user_id: str
-    amount: Decimal  # + top-up, − spend
-    kind: Literal["topup", "spend"]
+    amount: Decimal  # USD: + top-up, − spend (legacy_reset: closes a balance kept in TAZ before USD pricing)
+    kind: Literal["topup", "spend", "legacy_reset"]
     ref: str  # invoice id: one entry per invoice and kind
     category: str = ""
     simulated: bool = False

@@ -14,7 +14,11 @@ privacy policy too.
 - **Zerveil confirms payments with a viewing key.** A creator connects the Unified Full Viewing Key (UFVK) of a
   dedicated receiving account, after reading and accepting an authorization statement. That key can see the account's
   transactions; it cannot spend.
-- **The network is Zcash testnet (TAZ), which has no real monetary value.**
+- **Prices are USD; payments are shielded ZEC.** Budgets, deal terms, requested values and receipts are in USD. What
+  moves is shielded ZEC (TAZ on testnet), converted per invoice. **There is no stablecoin**: no USD stablecoin exists
+  on Zcash, and Zerveil never labels TAZ as USD or as a stablecoin.
+- **The network is Zcash testnet (TAZ), which has no real monetary value.** The USD→TAZ rate is a configured test
+  rate, not a market price.
 - In **simulated mode** (the default), nothing touches the blockchain and every record is labeled *simulated*.
 
 ## What is on the blockchain
@@ -29,6 +33,27 @@ be linked to each other or to the creator's profile address.
 Privacy also depends on how **you** pay. Paying from a transparent (`t…`) balance reveals your side of the
 transaction. Pay from a shielded balance, with a wallet that uses ZIP-317 fees and builds current (v5/v6)
 transactions.
+
+## Currency: what is shielded and what Zerveil sees
+
+| | On the blockchain | In Zerveil |
+|---|---|---|
+| USD value of a deal, milestone or invoice | **not on chain at all** | stored (campaigns, signed terms, invoices, receipts); visible to the two parties and operators |
+| TAZ / ZEC amount actually paid | encrypted (shielded) | stored on the invoice and receipt; visible to the two parties and operators |
+| Rate used (USD per TAZ) and its source | not on chain | stored on each invoice and receipt; shown on the public payment page |
+| Memo `ZRV1:<invoice id>` | encrypted | stored |
+
+- The memo carries only the invoice reference, never a USD amount or campaign terms.
+- The public payment page `/pay/:id` shows the requested USD value, the TAZ amount, the rate, the address and the
+  status, but no transaction ids or campaign terms.
+
+**Payment verification limits.**
+- Zerveil verifies the **asset amount** (TAZ/ZEC) that reached the invoice's address with enough confirmations. It does
+  not, and cannot, verify a USD settlement: the USD figure is the agreed business value and the conversion is Zerveil's
+  arithmetic at the stored rate.
+- On testnet that rate is a configured test rate, so "paid $20" means "paid the TAZ amount the test rate gives for $20".
+  It has no monetary meaning.
+- Mainnet pricing (a live ZEC/USD price source) is not implemented; the app refuses it.
 
 ## The viewing key: what you give Zerveil
 

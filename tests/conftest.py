@@ -82,6 +82,8 @@ def terms(campaign: CampaignSpec, influencer: InfluencerProfile, offer: Offer) -
         influencer_id=influencer.id,
         channel_id=influencer.channel_id,
         payee=influencer.payout_address,
+        currency="USD",
+        asset="TAZ",
         fixed_fee=offer.fixed_fee,
         cpm=offer.cpm,
         cap=offer.cap,

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
-import { DELIVERABLE_LABEL, MODEL_LABEL, termsText, zec } from "../format";
+import { DELIVERABLE_LABEL, LEGACY_AMOUNT_RE, MODEL_LABEL, isUsd, money, termsCurrency, termsText } from "../format";
 import { summarize, useNegotiationStream } from "../negotiation";
 import type { CompensationModel, Deal, FeedbackCategory, FeedbackInput, FeedbackRatings, NegotiationEvent, NegotiationFeedback } from "../types";
 import { A2AChat } from "./CampaignPanels";
@@ -37,11 +37,11 @@ function offerLabel(m: NegotiationEvent): string {
   return m.round === 1 ? "Opening offer" : "Counteroffer";
 }
 
-// Template notes ("Offer.", "Counter-offer: 2 TAZ fixed + …") only repeat the offer line under them
+// Template notes ("Offer.", "Counter-offer: $2.00 fixed + …"; legacy transcripts in test units) only repeat the offer line under them
 const sayMore = (m: NegotiationEvent) => {
   const text = m.content.trim();
   if (!m.offer) return text !== "";
-  return !/^(offer|counter-offer|accepted)\.?$/i.test(text) && !(/^(counter-offer|offer)[.:]/i.test(text) && /\d (TAZ|ZEC)\b/.test(text));
+  return !/^(offer|counter-offer|accepted)\.?$/i.test(text) && !(/^(counter-offer|offer)[.:]/i.test(text) && (/\$\d/.test(text) || LEGACY_AMOUNT_RE.test(text)));
 };
 
 export interface LiveNegotiationProps {
@@ -52,6 +52,8 @@ export interface LiveNegotiationProps {
   brand: string;
   /** Advertiser view only: the campaign's own limits, never sent to the creator's browser. */
   limits?: { budget: string; max_fixed: string; max_cpm: string; cap: string };
+  /** The campaign's currency ("USD"; legacy campaigns use test units). Default: from the deal's terms, else USD. */
+  currency?: string;
   deliverable?: string;
   /** Advertiser view only: your agent's reason for its message in each round (round → text). Never shown to the creator. */
   notes?: Record<number, string>;
@@ -61,7 +63,8 @@ export interface LiveNegotiationProps {
 }
 
 /** The A2A conversation of one deal, live: each agent message appears as soon as the agent produced it. */
-export function LiveNegotiation({ deal, viewer, creator, avatar, brand, limits, deliverable, notes, compact, onOpen }: LiveNegotiationProps) {
+export function LiveNegotiation({ deal, viewer, creator, avatar, brand, limits, currency, deliverable, notes, compact, onOpen }: LiveNegotiationProps) {
+  const cur = currency ?? (deal.terms ? termsCurrency(deal.terms) : "USD");
   const { events, status } = useNegotiationStream(deal.id, deal.state);
   const s = summarize(events);
   const end = useRef<HTMLDivElement>(null);
@@ -94,7 +97,7 @@ export function LiveNegotiation({ deal, viewer, creator, avatar, brand, limits, 
       body
     );
 
-  if (status === "legacy") return wrap(<A2AChat deal={deal} creator={creator} avatar={avatar} />); // ended before live transcripts existed
+  if (status === "legacy") return wrap(<A2AChat deal={deal} creator={creator} avatar={avatar} currency={cur} />); // ended before live transcripts existed
   if (status === "error") return wrap(<p className="error small">Could not open this conversation. Sign in again or reload the page.</p>);
   if (status === "connecting" && events.length === 0) return wrap(<Spinner label="Connecting to the negotiation…" />);
 
@@ -149,7 +152,12 @@ export function LiveNegotiation({ deal, viewer, creator, avatar, brand, limits, 
             label="Current offer"
             offer={s.advertiserOffer}
             model={model}
-            extra={limits ? `Budget ${zec(limits.budget)} · max ${zec(limits.max_fixed)} fixed, ${zec(limits.max_cpm)} CPM` : undefined}
+            currency={cur}
+            extra={
+              limits
+                ? `Budget ${money(limits.budget, cur, true)} · max ${money(limits.max_fixed, cur, true)} fixed, ${money(limits.max_cpm, cur, true)} CPM`
+                : undefined
+            }
           />
           <AgentCard
             role="Influencer"
@@ -159,6 +167,7 @@ export function LiveNegotiation({ deal, viewer, creator, avatar, brand, limits, 
             label="Current ask"
             offer={s.creatorAsk}
             model={model}
+            currency={cur}
             extra={deliverable ? `Deliverable: ${DELIVERABLE_LABEL[deliverable] ?? deliverable}` : undefined}
           />
         </div>
@@ -166,7 +175,7 @@ export function LiveNegotiation({ deal, viewer, creator, avatar, brand, limits, 
 
       {s.current && (
         <p className="ln-current">
-          On the table: <strong>{termsText(s.current, model)}</strong>
+          On the table: <strong>{termsText(s.current, model, cur)}</strong>
         </p>
       )}
 
@@ -177,6 +186,7 @@ export function LiveNegotiation({ deal, viewer, creator, avatar, brand, limits, 
             key={m.event_id}
             m={m}
             model={model}
+            currency={cur}
             avatar={m.agent_role === "influencer" ? avatar : undefined}
             note={viewer === "advertiser" && m.agent_role === "advertiser" && m.round ? notes?.[m.round] : undefined}
           />
@@ -199,7 +209,7 @@ export function LiveNegotiation({ deal, viewer, creator, avatar, brand, limits, 
             <span>{s.ending.content}</span>
             {s.ending.terms && (
               <span className="mono small">
-                {termsText(s.ending.terms, model)} · terms {s.ending.terms_hash?.slice(0, 12)}…
+                {termsText(s.ending.terms, model, cur)} · terms {s.ending.terms_hash?.slice(0, 12)}…
               </span>
             )}
           </div>
@@ -216,7 +226,7 @@ export function LiveNegotiation({ deal, viewer, creator, avatar, brand, limits, 
         </div>
       )}
 
-      {s.done && !compact && <FeedbackPanel dealId={deal.id} party={viewer} messages={s.messages.filter((m) => m.agent_role === viewer)} model={model} />}
+      {s.done && !compact && <FeedbackPanel dealId={deal.id} party={viewer} messages={s.messages.filter((m) => m.agent_role === viewer)} model={model} currency={cur} />}
     </div>,
   );
 }
@@ -229,6 +239,7 @@ function AgentCard(p: {
   label: string;
   offer: { fixed_fee: string; cpm: string; cap: string } | null;
   model: CompensationModel;
+  currency: string;
   extra?: string;
 }) {
   return (
@@ -243,14 +254,14 @@ function AgentCard(p: {
       </div>
       <div className="ln-agent-offer">
         <small>{p.label}</small>
-        <span>{p.offer ? termsText(p.offer, p.model) : "—"}</span>
+        <span>{p.offer ? termsText(p.offer, p.model, p.currency) : "—"}</span>
       </div>
       {p.extra && <small className="muted">{p.extra}</small>}
     </div>
   );
 }
 
-function Message({ m, model, avatar, note }: { m: NegotiationEvent; model: CompensationModel; avatar?: string; note?: string }) {
+function Message({ m, model, currency, avatar, note }: { m: NegotiationEvent; model: CompensationModel; currency: string; avatar?: string; note?: string }) {
   const side = m.agent_role === "advertiser" ? "ln-advertiser" : "ln-influencer";
   return (
     <div className={`ln-msg ${side}`}>
@@ -262,7 +273,7 @@ function Message({ m, model, avatar, note }: { m: NegotiationEvent; model: Compe
         {sayMore(m) && <span className="ln-text">{m.content}</span>}
         {m.offer && (
           <span className="ln-offer">
-            <b>{offerLabel(m)}</b> {termsText(m.offer, model)}
+            <b>{offerLabel(m)}</b> {termsText(m.offer, model, currency)}
           </span>
         )}
         {!m.offer && m.reply && <b className="ln-reply">{REPLY_LABEL[m.reply] ?? m.reply}</b>}
@@ -339,7 +350,19 @@ function Stars({ value, onChange, label, small }: { value: number | null; onChan
   );
 }
 
-function FeedbackPanel({ dealId, party, messages, model }: { dealId: string; party: Party; messages: NegotiationEvent[]; model: CompensationModel }) {
+function FeedbackPanel({
+  dealId,
+  party,
+  messages,
+  model,
+  currency,
+}: {
+  dealId: string;
+  party: Party;
+  messages: NegotiationEvent[];
+  model: CompensationModel;
+  currency: string;
+}) {
   const [existing, setExisting] = useState<NegotiationFeedback | null | undefined>(undefined);
   const [editing, setEditing] = useState(false);
   const [skipped, setSkipped] = useState(() => {
@@ -473,7 +496,7 @@ function FeedbackPanel({ dealId, party, messages, model }: { dealId: string; par
             <option value="">The agent's last message</option>
             {messages.map((m) => (
               <option key={m.message_id} value={m.message_id ?? ""}>
-                Round {m.round}: {m.offer ? termsText(m.offer, model) : m.content.slice(0, 50)}
+                Round {m.round}: {m.offer ? termsText(m.offer, model, currency) : m.content.slice(0, 50)}
               </option>
             ))}
           </select>
@@ -497,7 +520,7 @@ function FeedbackPanel({ dealId, party, messages, model }: { dealId: string; par
         </label>
         <div className="ln-offer-inputs">
           <label className="ln-field">
-            <span>Fixed fee (TAZ)</span>
+            <span>Fixed fee ({isUsd(currency) ? "$" : "legacy units"})</span>
             <input
               inputMode="decimal"
               value={form.suggested_offer?.fixed_fee ?? ""}
@@ -515,7 +538,7 @@ function FeedbackPanel({ dealId, party, messages, model }: { dealId: string; par
             />
           </label>
           <label className="ln-field">
-            <span>Per 1,000 views (TAZ)</span>
+            <span>Per 1,000 views ({isUsd(currency) ? "$" : "legacy units"})</span>
             <input
               inputMode="decimal"
               value={form.suggested_offer?.cpm ?? ""}

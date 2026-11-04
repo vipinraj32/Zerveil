@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState, type InputHTMLAttributes, type ReactNode } from "react";
 import { CAMPAIGN_TONE, STATE_INFO, humanize } from "../format";
 import type { CampaignStatus, DealState } from "../types";
 
@@ -133,6 +133,23 @@ export function Avatar({ src, name, size = 32 }: { src?: string; name: string; s
   ) : (
     <span className="avatar avatar-fallback" style={{ width: size, height: size }} aria-hidden>
       {name.slice(0, 1).toUpperCase()}
+    </span>
+  );
+}
+
+/** A USD amount input with a "$" prefix (optional unit suffix such as "/ 1K views"). Business amounts are always USD (never the payment asset). */
+export function UsdInput({ suffix = "", ...props }: InputHTMLAttributes<HTMLInputElement> & { suffix?: string }) {
+  return (
+    <span className="money-input">
+      <span className="money-affix" aria-hidden>
+        $
+      </span>
+      <input inputMode="decimal" {...props} />
+      {suffix && (
+        <span className="money-affix" aria-hidden>
+          {suffix}
+        </span>
+      )}
     </span>
   );
 }

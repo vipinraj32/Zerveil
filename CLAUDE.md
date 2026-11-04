@@ -9,6 +9,8 @@ Privacy-powered AI influencer agent marketplace: advertiser and creator agents n
 4. The advertiser accepts → one **fixed-fee milestone invoice per creator** on a fresh diversified address of that creator's connected receiving account → `PAYMENT_REQUESTED` → `PAYMENT_PENDING` (seen/mined/confirming) → `CONTENT_CREATION` only from scan data with enough confirmations (default 3). CPM-only deals skip straight to `CONTENT_CREATION`.
 5. The verifier checks the post via the YouTube API → `VERIFIED` → `PERFORMANCE_DUE`; at T+7d the performance fee (views × CPM, ≤ cap − fixed, `policy.check_milestone`) is requested as a second invoice, or waived → `COMPLETED`.
 
+Currency: **USD is the business currency** (budgets, agent floors/ceilings, offers, signed terms `currency="USD"`, milestones, API price, credit, limits, analytics, receipts). The **payment asset** is shielded ZEC (TAZ on testnet), converted once per invoice by `money.quote` (stored `usd_amount`, `usd_rate`, `rate_source`, `test_rate`; asset amount rounded up to the zatoshi). There is no USD stablecoin on Zcash: never label TAZ as USD or a stablecoin. Testnet uses `ZCASH_TEST_USD_RATE`, a labeled test rate; mainnet pricing is refused (no live price source). Legacy (pre-USD) records have `spec.currency="TAZ"` / `terms.currency=None` / `usd_amount=None` and are never relabeled as dollars or invoiced. Money is `Decimal`, never float.
+
 Core rule: **the LLM proposes, deterministic code decides, the payer's wallet signs.** Zerveil has no spending key; never add one, never route or hold funds through an operator wallet, never describe anything as escrow.
 
 ## Layout

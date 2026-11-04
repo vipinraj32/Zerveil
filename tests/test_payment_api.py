@@ -17,7 +17,10 @@ async def test_premium_search_is_payment_gated(onboarded):
         body = res.json()
         pay = body["payment"]
         assert body["error"] == "payment_required" and res.headers["X-Payment-Id"] == pay["id"] == body["retry_with_header"]["X-Payment-Id"]
-        assert pay["address"].startswith("utest1") and pay["memo"] == f"ZRV1:{pay['id']}" and Decimal(pay["amount"]) == Decimal("0.05")
+        assert pay["address"].startswith("utest1") and pay["memo"] == f"ZRV1:{pay['id']}"
+        # priced in USD ($0.05), paid in TAZ at the labeled test rate ($100 per TAZ by default): 0.0005 TAZ
+        assert pay["currency"] == "USD" and Decimal(pay["usd_amount"]) == Decimal("0.05") and pay["asset"] == pay["ticker"] == "TAZ"
+        assert Decimal(pay["amount"]) == Decimal("0.0005") and pay["test_rate"] is True and "test rate" in pay["rate_source"]
         assert pay["zip321_uri"].startswith("zcash:") and pay["simulated"] is True and pay["direct"] is True
         seller = await app.state.zx.deals.payments.receiving_account("api-seller")
         assert (await app.state.zx.ctx.store.get_invoice(pay["id"])).receiving_account_id == seller.id
@@ -82,7 +85,8 @@ async def test_payment_link_public_page_and_privacy(onboarded):
         assert (await adv.post("/api/payments/links", json={"title": "Tip jar", "amount": "1"})).status_code == 403  # creators only
         link = (await ava.post("/api/payments/links", json={"title": "Shout-out", "amount": "0.5", "description": "One mention"})).json()
         page = (await anon.get(f"/api/pay/{link['id']}")).json()
-        assert page["payee_name"] == "Ava TV" and page["amount"] == "0.5" and page["status"] == "awaiting_payment"
+        assert page["payee_name"] == "Ava TV" and page["usd_amount"] == "0.50" and page["currency"] == "USD" and page["status"] == "awaiting_payment"
+        assert Decimal(page["amount"]) == Decimal("0.005") and page["asset"] == "TAZ" and page["test_rate"] is True
         assert "notes" not in page and "owner_id" not in page and ua("ava") not in str(page)  # the creator's own address stays private
         # anyone may pay a link (simulated)
         assert (await anon.post(f"/api/dev/payments/{link['id']}/simulate", json={})).status_code == 401

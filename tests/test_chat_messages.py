@@ -8,7 +8,7 @@ from zerveil.agents import chat
 from .test_e2e import client_for, server  # noqa: F401 - pytest fixtures
 from .test_negotiation_stream import launch, setup
 
-AMOUNT = re.compile(r"([\d,]+\.\d\d) (?:TAZ|ZEC)")
+AMOUNT = re.compile(r"\$([\d,]+\.\d\d)")  # agents negotiate in USD
 
 
 def amounts(text: str) -> set[str]:
@@ -17,10 +17,11 @@ def amounts(text: str) -> set[str]:
 
 def test_pay_words_follow_the_compensation_model(offer):
     assert chat.pay_words(offer.model_copy(update={"compensation_model": "hybrid"})) == (
-        f"{offer.fixed_fee:.2f} TAZ up front plus {offer.cpm:.2f} TAZ per 1,000 views, up to {offer.cap:.2f} TAZ in total"
+        f"${offer.fixed_fee:.2f} up front plus ${offer.cpm:.2f} per 1,000 views, up to ${offer.cap:.2f} in total"
     )
-    assert chat.pay_words(offer.model_copy(update={"compensation_model": "fixed"})) == f"{offer.fixed_fee:.2f} TAZ for the video"
-    assert chat.pay_words(offer.model_copy(update={"compensation_model": "cpm"})).startswith(f"{offer.cpm:.2f} TAZ per 1,000 views")
+    assert chat.pay_words(offer.model_copy(update={"compensation_model": "fixed"})) == f"${offer.fixed_fee:.2f} for the video"
+    assert chat.pay_words(offer.model_copy(update={"compensation_model": "cpm"})).startswith(f"${offer.cpm:.2f} per 1,000 views")
+    assert "TAZ" not in chat.pay_words(offer)  # TAZ is never a negotiation currency
 
 
 def test_messages_are_reproducible_and_sentences(offer):

@@ -1,15 +1,19 @@
 // Receipts of confirmed payments the signed-in user made or received. A receipt is issued only after the view-only
 // scanner confirmed the payment in the recipient's own wallet; `receipt_hash` lets either party show a third party
-// exactly what they were given. Simulated receipts are labelled: no ZEC moved for them.
+// exactly what they were given. Simulated receipts are labelled: nothing moved on-chain for them.
 
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
 import { api } from "../api";
-import { CopyButton, SimulatedChip, TestnetNotice, TxLink } from "../components/Payments";
+import { CopyButton, PricingNotice, SimulatedChip, TestnetNotice, TxLink } from "../components/Payments";
 import { Card, Empty, ErrorText, Spinner } from "../components/ui";
-import { PURPOSE_LABEL, num, when, zec } from "../format";
+import { PURPOSE_LABEL, formatAsset, formatUsd, num, paymentAsset, when } from "../format";
 import { useMe } from "../session";
 import type { Receipt } from "../types";
+
+/** The payment asset of a receipt (receipts issued before USD pricing carry none: they were in the legacy unit). */
+const assetOf = (r: Receipt) => r.asset || paymentAsset();
+const isLegacy = (r: Receipt) => r.usd_amount === null || r.usd_amount === undefined;
 
 export function Receipts() {
   const { user } = useMe();
@@ -25,6 +29,7 @@ export function Receipts() {
         <div>
           <h1>Receipts</h1>
           <p className="muted">Confirmed payments you made or received. Every one was paid directly to the recipient's own wallet.</p>
+          <PricingNotice />
         </div>
         <TestnetNotice inline />
       </header>
@@ -60,7 +65,7 @@ export function Receipts() {
                       {r.title}
                       <div className="muted small">{PURPOSE_LABEL[r.purpose] ?? r.purpose}</div>
                     </td>
-                    <td>{zec(r.received || r.amount)}</td>
+                    <td>{isLegacy(r) ? `${formatAsset(r.received || r.amount, assetOf(r))} (legacy)` : formatUsd(r.usd_amount)}</td>
                     <td className="small">{r.recipient_id === user.id ? "Received" : r.payer_id === user.id ? "Paid" : "—"}</td>
                     <td>{r.confirmations}</td>
                     <td className="small">{when(r.issued_at)}</td>
@@ -99,13 +104,46 @@ export function ReceiptView() {
           <TestnetNotice inline />
         </div>
       </header>
-      {r.simulated && <p className="muted small">Confirmed by the simulated scanner: no ZEC moved. This receipt is not evidence of a real payment.</p>}
+      {r.simulated && <p className="muted small">Confirmed by the simulated scanner: nothing moved on-chain. This receipt is not evidence of a real payment.</p>}
       <Card>
+        <div className="checkout-amount">
+          {isLegacy(r) ? (
+            <>
+              {formatAsset(r.received || r.amount, assetOf(r))} <span>legacy (priced in {assetOf(r)})</span>
+            </>
+          ) : (
+            formatUsd(r.usd_amount)
+          )}
+        </div>
+        <p className="muted small">
+          {PURPOSE_LABEL[r.purpose] ?? r.purpose} · {when(r.issued_at)}
+          {isLegacy(r) && " · legacy receipt from before USD pricing; no dollar value"}
+        </p>
+      </Card>
+      <Card title={`Technical details${r.network.endsWith("testnet") ? " (Zcash testnet)" : ""}`}>
         <dl className="kv">
+          <dt>Payment asset</dt>
+          <dd>
+            {assetOf(r)} (shielded Zcash{r.network.endsWith("testnet") ? ", testnet" : ""})
+          </dd>
           <dt>Amount requested</dt>
-          <dd>{zec(r.amount)}</dd>
+          <dd>{formatAsset(r.amount, assetOf(r), 8)}</dd>
           <dt>Amount received</dt>
-          <dd>{zec(r.received)}</dd>
+          <dd>{formatAsset(r.received, assetOf(r), 8)}</dd>
+          {!isLegacy(r) && r.usd_rate && (
+            <>
+              <dt>Rate</dt>
+              <dd>
+                {formatUsd(r.usd_rate)} per {assetOf(r)}
+                {r.test_rate && (
+                  <div className="muted small">
+                    <em>a test rate, not a market price; the testnet amount has no real value · no stablecoin</em>
+                  </div>
+                )}
+                {r.rate_source && <div className="muted small">Source: {r.rate_source}</div>}
+              </dd>
+            </>
+          )}
           <dt>Purpose</dt>
           <dd>{PURPOSE_LABEL[r.purpose] ?? r.purpose}</dd>
           <dt>Network</dt>

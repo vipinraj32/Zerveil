@@ -6,7 +6,7 @@ import { Navigate } from "react-router";
 import { api } from "../../api";
 import { InvoiceStatusChip, SimulatedChip, TestnetNotice } from "../../components/Payments";
 import { ActionButton, Card, Empty, ErrorText, Notice, Spinner, Stat } from "../../components/ui";
-import { PURPOSE_LABEL, humanize, num, when, zec } from "../../format";
+import { PURPOSE_LABEL, formatAsset, humanize, num, requestValue, when } from "../../format";
 import { useLiveEvents, useResource } from "../../live";
 import { useMe } from "../../session";
 
@@ -117,9 +117,8 @@ function Invoices() {
                 <tr key={i.id}>
                   <td className="mono small">{i.id}</td>
                   <td>{PURPOSE_LABEL[i.purpose] ?? i.purpose}</td>
-                  <td>
-                    {zec(i.amount)}
-                    {Number(i.received) > 0 && <div className="muted small">received {zec(i.received)}</div>}
+                  <td title={`Payment details: ${formatAsset(i.amount, i.asset || i.ticker, 8)} requested, ${formatAsset(i.received, i.asset || i.ticker, 8)} received`}>
+                    {requestValue(i, true)}
                   </td>
                   <td>
                     <InvoiceStatusChip status={i.status} confirmations={i.confirmations} required={i.required_confirmations} />{" "}

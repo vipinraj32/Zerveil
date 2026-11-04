@@ -4,10 +4,20 @@
 import { useState, type FormEvent } from "react";
 import { Link } from "react-router";
 import { api } from "../../api";
-import { CopyButton, InvoiceStatusChip, PrivacyNote, SimulatedChip, TestnetNotice, WalletStatusPanel } from "../../components/Payments";
+import { CopyButton, InvoiceStatusChip, PricingNotice, PrivacyNote, SimulatedChip, TestnetNotice, WalletStatusPanel } from "../../components/Payments";
 import { ReceivingAccountPanel } from "../../components/ReceivingAccount";
-import { ActionButton, Card, Empty, ErrorText, Notice, Spinner, Stat } from "../../components/ui";
-import { MILESTONE_KIND, OPEN_INVOICE, PAID_INVOICE, PURPOSE_LABEL, ticker, when, zec } from "../../format";
+import { ActionButton, Card, Empty, ErrorText, Notice, Spinner, Stat, UsdInput } from "../../components/ui";
+import {
+  MILESTONE_KIND,
+  OPEN_INVOICE,
+  PAID_INVOICE,
+  PURPOSE_LABEL,
+  formatUsd,
+  requestValue,
+  sumUsd,
+  toCents,
+  when,
+} from "../../format";
 import { useLiveEvents, useResource } from "../../live";
 import { useMe } from "../../session";
 
@@ -49,8 +59,9 @@ function PaymentLinks() {
   return (
     <Card title="Payment links">
       <p className="muted small">
-        Get paid directly in shielded {ticker()}: create a link, share it, and the payer sees a Zerveil payment page with a fresh shielded address of
-        your own receiving account and a memo. The money goes straight to your wallet; Zerveil only confirms it arrived. Needs a connected viewing key.
+        Ask for a USD amount and get paid directly in shielded Zcash: create a link, share it, and the payer sees a Zerveil payment page with a fresh
+        shielded address of your own receiving account and a memo. The money goes straight to your wallet; Zerveil only confirms it arrived. Needs a
+        connected viewing key.
       </p>
       <form className="form" onSubmit={submit}>
         <div className="grid-2">
@@ -59,8 +70,9 @@ function PaymentLinks() {
             <input value={title} onChange={(e) => setTitle(e.target.value)} required maxLength={80} placeholder="Shout-out in my next video" />
           </label>
           <label>
-            Amount ({ticker()})
-            <input value={amount} onChange={(e) => setAmount(e.target.value)} required inputMode="decimal" placeholder="0.5" />
+            Amount ($)
+            <UsdInput value={amount} onChange={(e) => setAmount(e.target.value)} required placeholder="25.00" />
+            <small>Dollars and cents, e.g. 25.00.</small>
           </label>
         </div>
         <label>
@@ -68,7 +80,7 @@ function PaymentLinks() {
           <input value={description} onChange={(e) => setDescription(e.target.value)} maxLength={300} />
         </label>
         <div className="row">
-          <button className="btn btn-primary" disabled={busy || !title.trim() || !(Number(amount) > 0)}>
+          <button className="btn btn-primary" disabled={busy || !title.trim() || !/^\d+(\.\d{1,2})?$/.test(amount.trim()) || !((toCents(amount) ?? 0n) > 0n)}>
             {busy ? "Creating…" : "Create payment link"}
           </button>
         </div>
@@ -102,7 +114,7 @@ function PaymentLinks() {
                       {l.title}
                       {l.description && <div className="muted small">{l.description}</div>}
                     </td>
-                    <td>{zec(l.amount)}</td>
+                    <td>{requestValue(l, true)}</td>
                     <td>
                       <InvoiceStatusChip status={l.status} confirmations={l.confirmations} required={l.required_confirmations} />
                       <SimulatedChip simulated={l.simulated} />
@@ -144,13 +156,25 @@ function Received() {
   const invoices = useResource(api.invoices, "my-invoices");
   useLiveEvents((e) => e.type === "invoice", invoices.reload);
   const list = (invoices.data ?? []).filter((i) => i.recipient_id === user.id).sort((a, b) => b.created_at.localeCompare(a.created_at));
-  const confirmed = list.filter((i) => PAID_INVOICE.has(i.status)).reduce((s, i) => s + Number(i.received || i.amount), 0);
-  const open = list.filter((i) => OPEN_INVOICE.has(i.status)).reduce((s, i) => s + Number(i.amount), 0);
+  // USD values of USD-priced requests, summed in integer cents; the asset actually received alongside
+  const paid = list.filter((i) => PAID_INVOICE.has(i.status));
+  const pending = list.filter((i) => OPEN_INVOICE.has(i.status));
+  const confirmed = sumUsd(paid.map((i) => i.usd_amount));
+  const open = sumUsd(pending.map((i) => i.usd_amount));
+  const legacyPending = pending.filter((i) => i.usd_amount == null);
   return (
     <>
       <div className="stats">
-        <Stat label="Confirmed in your wallet" value={zec(confirmed)} hint="What the scanner confirmed through Zerveil requests. Not your wallet balance." />
-        <Stat label="Requested, not yet confirmed" value={zec(open)} hint="Payment requests advertisers or payers have not completed yet" />
+        <Stat
+          label="Confirmed in your wallet"
+          value={formatUsd(confirmed)}
+          hint="USD value of the requests the scanner confirmed through Zerveil. Not your wallet balance."
+        />
+        <Stat
+          label="Requested, not yet confirmed"
+          value={formatUsd(open)}
+          hint={`Payment requests advertisers or payers have not completed yet${legacyPending.length ? ` (plus ${legacyPending.length} legacy request(s) in test units)` : ""}`}
+        />
         <Stat label="Requests" value={list.length} />
       </div>
       <Card title="Payments to your wallet">
@@ -186,10 +210,7 @@ function Received() {
                         )}
                       </div>
                     </td>
-                    <td>
-                      {zec(i.amount)}
-                      {Number(i.received) > 0 && i.received !== i.amount && <div className="muted small">received {zec(i.received)}</div>}
-                    </td>
+                    <td>{requestValue(i, true)}</td>
                     <td>
                       <InvoiceStatusChip status={i.status} confirmations={i.confirmations} required={i.required_confirmations} />{" "}
                       <SimulatedChip simulated={i.simulated} />
@@ -232,6 +253,7 @@ export function CreatorPayments() {
         </div>
         <TestnetNotice inline />
       </div>
+      <PricingNotice />
 
       {!user.zcash_address && (
         <Notice tone="warn">

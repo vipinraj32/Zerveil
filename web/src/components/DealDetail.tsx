@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { api } from "../api";
-import { MODEL_LABEL, humanize, num, zec, videoLength, when } from "../format";
+import { LEGACY_PRICING_NOTE, MODEL_LABEL, humanize, isUsd, money, num, sumUsd, termsCurrency, videoLength, when } from "../format";
 import { useLiveEvents, useResource } from "../live";
 import { useMe } from "../session";
 import type { Deal } from "../types";
@@ -24,7 +24,8 @@ export function DealDetail({ deal, title, actions, conversation = true }: { deal
   const full = useResource(() => (milestones.length ? api.deal(deal.id) : Promise.resolve(null)), `${deal.id}:full:${milestones.map((m) => m.status).join(",")}`);
   useLiveEvents((e) => e.deal_id === deal.id || e.type === "invoice", full.reload);
   const t = deal.terms;
-  const paid = milestones.filter((m) => m.status === "confirmed").reduce((s, m) => s + Number(m.amount), 0);
+  const cur = termsCurrency(t);
+  const paid = sumUsd(milestones.filter((m) => m.status === "confirmed").map((m) => m.amount)); // integer cents
 
   return (
     <Card title={title} actions={<StateBadge state={deal.state} />} className="deal-detail">
@@ -60,11 +61,21 @@ export function DealDetail({ deal, title, actions, conversation = true }: { deal
               {MODEL_LABEL[t.compensation_model] ?? t.compensation_model} <span className="muted small">({t.pricing_version})</span>
             </dd>
             <dt>Fixed fee</dt>
-            <dd>{zec(t.fixed_fee)}</dd>
+            <dd>{money(t.fixed_fee, cur)}</dd>
             <dt>Per 1,000 views</dt>
-            <dd>{zec(t.cpm)}</dd>
+            <dd>{money(t.cpm, cur)}</dd>
             <dt>Cap (most it can pay)</dt>
-            <dd>{zec(t.cap)}</dd>
+            <dd>{money(t.cap, cur)}</dd>
+            <dt>Paid in</dt>
+            <dd>
+              {isUsd(cur) ? (
+                <>
+                  shielded {t.asset} on <span className="mono">{t.network}</span>, converted per payment request at a test rate
+                </>
+              ) : (
+                <span className="muted">{LEGACY_PRICING_NOTE}</span>
+              )}
+            </dd>
             <dt>Publish by</dt>
             <dd>{when(t.publish_by)}</dd>
             <dt>Must stay live</dt>
@@ -134,7 +145,7 @@ export function DealDetail({ deal, title, actions, conversation = true }: { deal
       {/* the creator's deal page shows these in its own Payment card, at the top */}
       {role === "advertiser" && milestones.length > 0 && (
         <>
-          <h3>Payments · {zec(paid)} confirmed in the creator's wallet</h3>
+          <h3>Payments · {money(paid, cur)} confirmed in the creator's wallet</h3>
           <PaymentLifecycle deal={deal} />
           <MilestoneTable deal={deal} invoices={full.data?.milestone_invoices} />
         </>

@@ -3,7 +3,7 @@
 
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { termsText, zec } from "../format";
+import { money, termsText } from "../format";
 import { subscribeLive } from "../live";
 import type { CompensationModel, NegotiationProgress, NegotiationSession, SessionStatus } from "../types";
 import { Avatar } from "./ui";
@@ -68,9 +68,9 @@ export function useNegotiationQueue(campaignId: string) {
   return { progress, sessions, error };
 }
 
-function offerLine(s: NegotiationSession, model: CompensationModel): string {
-  if (s.status === "AGREED" && s.final_offer) return termsText(s.final_offer, model);
-  if (s.latest_offer) return `${s.latest_offer.proposer === "influencer" ? "Ask" : "Offer"}: ${termsText(s.latest_offer, model)}`;
+function offerLine(s: NegotiationSession, model: CompensationModel, currency = "USD"): string {
+  if (s.status === "AGREED" && s.final_offer) return termsText(s.final_offer, model, currency);
+  if (s.latest_offer) return `${s.latest_offer.proposer === "influencer" ? "Ask" : "Offer"}: ${termsText(s.latest_offer, model, currency)}`;
   return s.status === "QUEUED" ? "Waiting for its turn" : "";
 }
 
@@ -80,6 +80,8 @@ export function NegotiationQueue(p: {
   name: (creatorId: string) => string;
   avatar: (creatorId: string) => string | undefined;
   model: CompensationModel;
+  /** The campaign's currency ("USD"; legacy campaigns use test units). */
+  currency?: string;
   focus: string | null;
   following: boolean;
   all: boolean;
@@ -148,7 +150,7 @@ export function NegotiationQueue(p: {
               <Avatar src={p.avatar(s.creator_id)} name={p.name(s.creator_id)} size={24} />
               <span className="nq-who">
                 <strong>{p.name(s.creator_id)}</strong>
-                <small>{offerLine(s, p.model)}</small>
+                <small>{offerLine(s, p.model, p.currency)}</small>
               </span>
               <span className="nq-meta">
                 <span className={`nq-badge nq-badge-${s.status.toLowerCase()}`}>{SESSION_LABEL[s.status]}</span>
@@ -186,11 +188,13 @@ export function NegotiationSummary({
   sessions,
   name,
   model,
+  currency = "USD",
 }: {
   progress: NegotiationProgress;
   sessions: NegotiationSession[];
   name: (id: string) => string;
   model: CompensationModel;
+  currency?: string;
 }) {
   const agreed = sessions.filter((s) => s.status === "AGREED" && s.final_offer);
   const ended = sessions.filter((s) => TERMINAL.includes(s.status)).length;
@@ -223,11 +227,11 @@ export function NegotiationSummary({
         )}
         <div>
           <dt>Agreed spend (max)</dt>
-          <dd>{zec(progress.agreed_spend)}</dd>
+          <dd>{money(progress.agreed_spend, currency)}</dd>
         </div>
         <div>
           <dt>Proposed spend, all offers</dt>
-          <dd className="muted">{zec(progress.proposed_spend)}</dd>
+          <dd className="muted">{money(progress.proposed_spend, currency)}</dd>
         </div>
       </dl>
       {agreed.length > 0 && (
@@ -235,7 +239,7 @@ export function NegotiationSummary({
           {agreed.map((s) => (
             <li key={s.negotiation_id}>
               <span>{name(s.creator_id)}</span>
-              <span className="mono small">{termsText(s.final_offer!, model)}</span>
+              <span className="mono small">{termsText(s.final_offer!, model, currency)}</span>
             </li>
           ))}
         </ul>

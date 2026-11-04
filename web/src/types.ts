@@ -61,8 +61,21 @@ export interface ZcashInfo {
   /** "" = no explorer links; otherwise a template with "{txid}" or a prefix to append the txid to. */
   explorer_tx_url: string;
   faucet_url: string | null;
-  /** "Zcash Testnet — TAZ — No real monetary value" on testnet, otherwise null. */
+  /** "Zcash Testnet — test payments only — No real monetary value" on testnet, otherwise null. */
   testnet_notice: string | null;
+}
+
+export interface CurrencyInfo {
+  business_currency: "USD";
+  /** The payment asset: TAZ on testnet. */
+  payment_asset: string;
+  payment_network: string;
+  /** Always null: there is no USD stablecoin on Zcash. */
+  stablecoin: null;
+  /** USD per 1 asset unit (a configured test rate on testnet); null where pricing is not supported. */
+  usd_per_unit: string | null;
+  test_rate: boolean;
+  rate_notice: string;
 }
 
 export interface PlatformStatus {
@@ -70,6 +83,9 @@ export interface PlatformStatus {
   payment_mode: "simulated" | "zcash";
   payments_simulated: boolean;
   zcash: ZcashInfo;
+  /** Business currency (USD) vs what is actually paid (shielded TAZ on testnet). No stablecoin. */
+  currency: CurrencyInfo;
+  /** USD. */
   premium_search_price: string;
   verifier_online: boolean;
   login_configured: boolean;
@@ -118,6 +134,8 @@ export interface CampaignSpec {
   advertiser: string;
   brand_handle: string;
   niche: string;
+  /** "USD"; "TAZ" on campaigns created before USD pricing (legacy test units, closed). */
+  currency: string;
   budget: string;
   max_creators: number;
   min_subscribers: number;
@@ -169,6 +187,8 @@ export interface Campaign {
 /** The budget is a spending limit, not money held: reserved = caps of deals that may still be paid or were paid;
  * paid = milestone payments the scanner confirmed in creators' wallets. */
 export interface PaymentSummary {
+  /** The campaign's currency: "USD" ("TAZ" on legacy campaigns). */
+  currency: string;
   budget: string;
   reserved: string;
   paid: string;
@@ -196,7 +216,13 @@ export interface CampaignPayments {
   invoices: OwnerInvoice[];
   /** One ZIP-321 multi-recipient request covering every open invoice, or null when nothing is open. */
   pay_all_uri: string | null;
+  currency: "USD";
+  /** USD value of every open request. */
+  open_total_usd: string;
+  /** Asset amount to pay for every open request (what the pay-all URI asks for). */
   open_total: string;
+  /** The payment asset of the open requests ("TAZ"), or null when none / mixed. */
+  open_asset: string | null;
   summary: PaymentSummary;
 }
 
@@ -221,6 +247,18 @@ export interface PaymentRequest {
   purpose: InvoicePurpose;
   title: string;
   description: string;
+  /** "USD"; "" on legacy invoices priced directly in the asset. */
+  currency: string;
+  /** The requested value in USD; null on legacy invoices. */
+  usd_amount: string | null;
+  /** The payment asset (TAZ on testnet). */
+  asset: string;
+  /** USD per 1 asset unit used to convert this invoice. */
+  usd_rate: string | null;
+  rate_source: string;
+  /** The rate is a configured test rate, not a market price. */
+  test_rate: boolean;
+  /** Asset amount to pay (TAZ). */
   amount: string;
   network: string;
   address: string;
@@ -307,7 +345,9 @@ export interface Receipt {
   title: string;
   payer_id: string;
   recipient_id: string;
+  /** Asset amount requested (TAZ). */
   amount: string;
+  /** Asset amount received (TAZ). */
   received: string;
   network: string;
   pools: string[];
@@ -320,6 +360,13 @@ export interface Receipt {
   milestone_id: string | null;
   simulated: boolean;
   issued_at: string;
+  /** USD pricing; all null on receipts issued before it. */
+  currency: string | null;
+  usd_amount: string | null;
+  asset: string | null;
+  usd_rate: string | null;
+  rate_source: string | null;
+  test_rate: boolean | null;
   receipt_hash: string;
   explorer_urls: string[];
 }
@@ -359,6 +406,10 @@ export interface WalletStatus {
   receiving_account_connected: boolean;
   /** What the scanner confirmed arriving in your wallet through Zerveil invoices. Not a wallet balance. */
   confirmed_received_via_zerveil: string;
+  /** USD value of those requests (USD-priced ones only). */
+  confirmed_received_usd: string;
+  /** The payment asset of confirmed_received_via_zerveil. */
+  asset: string;
   custody: string;
 }
 
@@ -375,7 +426,8 @@ export interface CreditEntry {
   id: string;
   user_id: string;
   amount: string;
-  kind: "topup" | "spend";
+  /** USD. legacy_reset closes a credit balance kept in TAZ before USD pricing. */
+  kind: "topup" | "spend" | "legacy_reset";
   ref: string;
   category: string;
   simulated: boolean;
@@ -423,7 +475,7 @@ export interface PremiumSearchResult {
 
 export type PaymentChallenge = Pick<
   PaymentRequest,
-  "id" | "network" | "ticker" | "amount" | "address" | "memo" | "zip321_uri" | "pay_url" | "expires_at" | "status" | "confirmations" | "required_confirmations" | "simulated"
+  "id" | "currency" | "usd_amount" | "asset" | "usd_rate" | "rate_source" | "test_rate" | "network" | "ticker" | "amount" | "address" | "memo" | "zip321_uri" | "pay_url" | "expires_at" | "status" | "confirmations" | "required_confirmations" | "simulated"
 >;
 
 export interface PaymentRequired {
@@ -496,6 +548,9 @@ export interface DealTerms {
   influencer_id: string;
   channel_id: string;
   payee: string; // the creator's shielded Unified Address (redacted for advertisers)
+  /** What fixed_fee / cpm / cap are in: "USD"; null/missing on terms signed before USD pricing (TAZ). */
+  currency?: string | null;
+  /** The payment asset (TAZ on testnet). */
   asset: string;
   network: string;
   compensation_model: CompensationModel;
@@ -597,6 +652,7 @@ export type MilestoneStatus = "scheduled" | "requested" | "pending" | "confirmed
 export interface Milestone {
   id: string;
   kind: "fixed" | "performance";
+  /** In the deal's currency (USD; TAZ on legacy deals). The invoice holds the asset amount actually paid. */
   amount: string;
   status: MilestoneStatus;
   invoice_id: string | null;
@@ -1000,7 +1056,7 @@ export interface CreatorProfileView {
     campaign_id: string;
     campaign: string;
     state: DealState;
-    terms: { compensation_model: string; fixed_fee: string; cpm: string; cap: string; publish_by: string } | null;
+    terms: { compensation_model: string; fixed_fee: string; cpm: string; cap: string; publish_by: string; currency: string } | null;
     video_id: string | null;
     views: number | null;
     paid: string;

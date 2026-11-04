@@ -19,8 +19,8 @@ from decimal import Decimal
 from typing import Any
 
 from ..models import CampaignSpec, InfluencerProfile, Offer, new_id, requirements_hash
+from ..money import format_usd
 from ..policy.engine import check_offer
-from ..zcash.amounts import ticker
 from .models import Action, AdvertiserPolicy, CheckResult, DecisionRecord, InfluencerPolicy
 from .pricing import CENT, calculate
 
@@ -34,7 +34,7 @@ class Decision:
 
 
 def _money(x: Decimal) -> str:
-    return f"{x.quantize(CENT)} {ticker()}"
+    return format_usd(x)
 
 
 def _terms_text(offer: Offer) -> str:

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router";
 import { api } from "../../api";
 import { Avatar, CampaignBadge, ErrorText, Spinner, StateBadge } from "../../components/ui";
-import { DELIVERABLE_LABEL, campaignName, num, zec, when } from "../../format";
+import { DELIVERABLE_LABEL, LEGACY_PRICING_NOTE, campaignName, formatUsd, isUsd, money, num, sumUsd, when } from "../../format";
 import { useLiveEvents, useResource } from "../../live";
 import { Icon } from "../landing/parts";
 import { useMe, useSession } from "../../session";
@@ -23,13 +23,14 @@ const PIPELINE: { label: string; states: DealState[]; tone: string }[] = [
   { label: "Closed", states: ["REJECTED", "PAYMENT_EXPIRED", "UNDELIVERED", "ARCHIVED"], tone: "muted" },
 ];
 
-const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
-/** Milestone payments the scanner confirmed in the creator's wallet (plus legacy history of archived deals). */
-const paidTo = (d: Deal) =>
-  sum((d.milestones ?? []).filter((m) => m.status === "confirmed").map((m) => Number(m.amount))) +
-  sum(d.payouts.filter((p) => p.kind !== "refund").map((p) => Number(p.amount)));
+// Amounts are summed as decimal strings in integer cents (no float accumulation). They are in the campaign's currency:
+// USD, or legacy test units on old campaigns (kept out of the USD totals).
+const confirmedAmounts = (d: Deal) => [
+  ...(d.milestones ?? []).filter((m) => m.status === "confirmed").map((m) => m.amount),
+  ...d.payouts.filter((p) => p.kind !== "refund").map((p) => p.amount), // legacy history of archived deals
+];
 /** Milestone payments requested from the advertiser and not yet confirmed. */
-const requestedOf = (d: Deal) => sum((d.milestones ?? []).filter((m) => m.status === "requested" || m.status === "pending").map((m) => Number(m.amount)));
+const requestedAmounts = (d: Deal) => (d.milestones ?? []).filter((m) => m.status === "requested" || m.status === "pending").map((m) => m.amount);
 
 export async function loadDeals(): Promise<Deal[]> {
   const campaigns = await api.campaigns();
@@ -59,9 +60,13 @@ export function AdvertiserHome() {
   const byCampaign = new Map<string, Deal[]>();
   for (const d of allDeals) byCampaign.set(d.campaign_id, [...(byCampaign.get(d.campaign_id) ?? []), d]);
 
-  const budget = sum(list.map((c) => Number(c.spec.budget)));
-  const paid = sum(allDeals.map(paidTo));
-  const requested = sum(allDeals.map(requestedOf));
+  // USD totals cover USD campaigns only; legacy campaigns (priced in test units) are counted separately
+  const usdCampaigns = new Set(list.filter((c) => isUsd(c.spec.currency)).map((c) => c.spec.id));
+  const legacyCount = list.length - usdCampaigns.size;
+  const usdDeals = allDeals.filter((d) => usdCampaigns.has(d.campaign_id));
+  const budget = sumUsd(list.filter((c) => usdCampaigns.has(c.spec.id)).map((c) => c.spec.budget));
+  const paid = sumUsd(usdDeals.flatMap(confirmedAmounts));
+  const requested = sumUsd(usdDeals.flatMap(requestedAmounts));
   const agreed = allDeals.filter((d) => d.terms && d.state !== "REJECTED").length;
   const inProgress = list.filter((c) => !["done", "failed"].includes(c.status)).length;
   const attention = [
@@ -98,9 +103,20 @@ export function AdvertiserHome() {
       <ErrorText error={campaigns.error ?? deals.error} />
 
       <section className="kpis" aria-label="Summary">
-        <Kpi icon="ledger" label="Total budget" value={zec(budget)} foot={`${list.length} campaign${list.length === 1 ? "" : "s"} · ${inProgress} in progress`} />
-        <Kpi icon="shield" label="Payments requested" value={zec(requested)} foot={simulated ? "Simulated — no ZEC moved" : `Shielded ${status?.zcash.ticker ?? "ZEC"} · paid from your wallet`} tone="blue" />
-        <Kpi icon="check" label="Paid to creators" value={zec(paid)} foot="Confirmed in creators' wallets" tone="orange" />
+        <Kpi
+          icon="ledger"
+          label="Total budget"
+          value={formatUsd(budget, true)}
+          foot={`${list.length} campaign${list.length === 1 ? "" : "s"} · ${inProgress} in progress${legacyCount ? ` · ${legacyCount} legacy not included` : ""}`}
+        />
+        <Kpi
+          icon="shield"
+          label="Payments requested"
+          value={formatUsd(requested, true)}
+          foot={simulated ? "Simulated — no real payments" : "Awaiting payment from your own wallet"}
+          tone="blue"
+        />
+        <Kpi icon="check" label="Paid to creators" value={formatUsd(paid, true)} foot="Confirmed in creators' wallets" tone="orange" />
         <Kpi icon="agents" label="Deals agreed" value={num(agreed)} foot={`${num(directory.data?.length ?? 0)} creator agents live`} />
       </section>
 
@@ -342,9 +358,14 @@ export function CampaignList({ campaigns, byCampaign, pageSize = 5 }: { campaign
 }
 
 function CampaignRow({ campaign: c, deals }: { campaign: Campaign; deals: Deal[] }) {
+  const cur = c.spec.currency;
+  const budgetText = money(c.spec.budget, cur, true);
+  const paidText = money(sumUsd(deals.flatMap(confirmedAmounts)), cur, true);
+  const committedText = money(sumUsd(deals.flatMap(requestedAmounts)), cur, true);
+  // bar widths only: a ratio, not a displayed amount
   const budget = Number(c.spec.budget) || 0;
-  const paid = sum(deals.map(paidTo));
-  const committed = sum(deals.map(requestedOf));
+  const paid = Number(sumUsd(deals.flatMap(confirmedAmounts)));
+  const committed = Number(sumUsd(deals.flatMap(requestedAmounts)));
   const agreed = deals.filter((d) => d.terms && d.state !== "REJECTED").length;
   const pct = (v: number) => `${budget ? Math.min(100, (v / budget) * 100) : 0}%`;
   return (
@@ -360,21 +381,22 @@ function CampaignRow({ campaign: c, deals }: { campaign: Campaign; deals: Deal[]
           </span>
           <CampaignBadge status={c.status} />
         </span>
-        <span className="camp-bar" title={`Paid ${zec(paid)} · requested ${zec(committed)} of ${zec(budget)} budget`}>
+        <span className="camp-bar" title={`Paid ${paidText} · requested ${committedText} of ${budgetText} budget`}>
           <span className="fill fill-orange" style={{ width: pct(paid) }} />
           <span className="fill fill-blue" style={{ width: pct(committed) }} />
         </span>
         <span className="camp-meta">
           <span>
-            <b>{zec(budget)}</b> budget
+            <b>{budgetText}</b> budget
           </span>
           <span>
             <b>{agreed}</b>/{c.spec.max_creators} creators
           </span>
           <span>
-            <b>{zec(paid)}</b> paid
+            <b>{paidText}</b> paid
           </span>
         </span>
+        {!isUsd(cur) && <span className="muted small">{LEGACY_PRICING_NOTE}</span>}
         {c.error && <span className="error small">{c.error}</span>}
       </Link>
     </li>

@@ -83,6 +83,9 @@ def check_terms(campaign: CampaignSpec, terms: DealTerms, influencer: Influencer
     r.require(terms.payee == influencer.payout_address, "payee is not the creator's registered payout address")
     r.require(unified_address_problem(terms.payee, network) is None, "payee is not a shielded Unified Address on this network")
     r.require(terms.network == f"zcash-{network}", f"terms are for {terms.network}, not zcash-{network}")
+    r.require(terms.currency == campaign.currency == "USD", f"terms are priced in {terms.currency or 'TAZ'}, not the campaign's USD")
+    asset = "ZEC" if network == "mainnet" else "TAZ"
+    r.require(terms.asset == asset, f"terms pay in {terms.asset}, not {asset} on zcash-{network}")
     r.require(
         (terms.fixed_fee, terms.cpm, terms.cap) == (agreed.fixed_fee, agreed.cpm, agreed.cap),
         "amounts differ from the agreed offer",

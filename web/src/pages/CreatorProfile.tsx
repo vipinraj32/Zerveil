@@ -2,7 +2,7 @@ import { Link, useParams } from "react-router";
 import { api } from "../api";
 import { EvidenceTable } from "../components/Evidence";
 import { Address, Avatar, Card, Empty, ErrorText, Notice, Spinner, StateBadge, Stat } from "../components/ui";
-import { MODEL_LABEL, humanize, num, zec, when } from "../format";
+import { MODEL_LABEL, humanize, money, num, termsText, when } from "../format";
 import { useLiveEvents, useResource } from "../live";
 import { useMe } from "../session";
 import type { CreatorProfileView } from "../types";
@@ -236,7 +236,7 @@ function ProfileBody({ p, isSelf }: { p: CreatorProfileView; isSelf: boolean }) 
                   </td>
                   <td className="small">
                     {d.terms
-                      ? `${MODEL_LABEL[d.terms.compensation_model] ?? humanize(d.terms.compensation_model)} · ${zec(d.terms.fixed_fee)} + ${zec(d.terms.cpm)} CPM · cap ${zec(d.terms.cap)}`
+                      ? `${MODEL_LABEL[d.terms.compensation_model] ?? humanize(d.terms.compensation_model)} · ${termsText(d.terms, "hybrid", d.terms.currency)}`
                       : "—"}
                   </td>
                   <td className="small">
@@ -249,7 +249,7 @@ function ProfileBody({ p, isSelf }: { p: CreatorProfileView; isSelf: boolean }) 
                     )}
                     {d.views !== null && <div className="muted">{num(d.views)} views at check</div>}
                   </td>
-                  <td>{zec(d.paid)}</td>
+                  <td>{money(d.paid, d.terms?.currency ?? "USD", true)}</td>
                   <td className="small muted">{when(d.updated_at)}</td>
                 </tr>
               ))}

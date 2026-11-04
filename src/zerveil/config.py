@@ -62,8 +62,13 @@ class Settings(BaseSettings):
     zcash_api_seller_ufvk: str = ""
     zcash_api_seller_birthday: int = 0
 
-    # HTTP 402: price of one premium API call, and how long its invoice stays payable
-    premium_search_price: Decimal = Decimal("0.05")
+    # USD is the business currency; the payment asset is shielded ZEC (TAZ on testnet), converted per invoice.
+    # Testnet TAZ has no market price: this is a TEST RATE (USD per 1 TAZ), labeled as such wherever it is shown.
+    # It is not a market price and gives TAZ no value. Mainnet pricing (a live ZEC/USD source) is not implemented.
+    zcash_test_usd_rate: Decimal = Field(Decimal("100"), gt=0)
+
+    # HTTP 402: price of one premium API call in USD, and how long its invoice stays payable
+    premium_search_price: Decimal = Field(Decimal("0.05"), validation_alias=AliasChoices("premium_search_price_usd", "premium_search_price"))
     api_invoice_ttl_minutes: int = 30
 
     # Negotiation: how long one agent reply may take before that creator's negotiation ends as TIMED_OUT

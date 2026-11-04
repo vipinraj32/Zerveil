@@ -30,7 +30,7 @@ def agent_card(me: InfluencerIdentity, url: str) -> AgentCard:
     return AgentCard(
         name=f"{p.name} — sponsorship agent",
         description=f"Negotiates paid YouTube Shorts for {p.name} ({p.subscribers:,} subs, {', '.join(p.all_niches)}). "
-        f"Signs deal terms with Ed25519 agent key {p.agent_signer}. Paid in shielded ZEC; the payout address is shared only "
+        f"Signs deal terms with Ed25519 agent key {p.agent_signer}. Prices in USD, paid in shielded ZEC (TAZ on testnet); the payout address is shared only "
         "inside signed terms, never on this public card.",
         version="0.1.0",
         supported_interfaces=[AgentInterface(url=url, protocol_binding="JSONRPC", protocol_version="1.0")],

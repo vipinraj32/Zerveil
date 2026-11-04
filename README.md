@@ -7,7 +7,12 @@ sponsorships with them over A2A. Advertisers then pay each creator **directly**,
 address of the creator's own wallet. Zerveil never holds the money. It issues invoices, watches the creator's account
 through a viewing key the creator connected, confirms the payment, issues a receipt and tracks the campaign.
 
-> **Zcash Testnet — TAZ — No real monetary value.**
+**Prices are in USD; payments are shielded ZEC.** Budgets, negotiated fees, signed terms, invoices' requested values,
+receipts and analytics are USD. What the advertiser actually sends is shielded ZEC (TAZ on testnet), converted from
+USD once per invoice. There is **no USD stablecoin on Zcash**, so Zerveil does not claim one, and on testnet the
+conversion uses a labeled **test rate** because TAZ has no market price. See [Currency](#currency-usd-prices-shielded-zec-payments).
+
+> **Zcash Testnet — test payments only — No real monetary value.**
 > - By default the app runs in `PAYMENT_MODE=simulated`: an in-process scanner stand-in runs the full flow, every
 >   record is labeled *simulated*, and **no TAZ moves**.
 > - `PAYMENT_MODE=zcash` scans the real testnet with [zcash-devtool](https://github.com/zcash/zcash-devtool) through
@@ -94,7 +99,7 @@ Advertiser ──► Advertiser Agent ──A2A──► Creator Agents (one at 
 4. **Accept and pay.** The advertiser accepts the agreements. Each creator gets a **fixed-fee milestone invoice**
    containing:
    - a fresh diversified Unified Address of the creator's connected receiving account;
-   - the amount;
+   - the requested value in USD, the TAZ amount to pay and the rate it was converted at;
    - a memo `ZRV1:PAY-…`;
    - a ZIP-321 link.
 
@@ -171,9 +176,35 @@ awaiting_payment ──(note in mempool)──► seen ──(mined)──► mi
   - the performance milestone may not exceed `cap − fixed`.
 
 **Amounts.**
-- Amounts are exact decimals with at most 8 places (zatoshi).
+- USD amounts are exact decimals with 2 places; asset amounts have at most 8 places (zatoshi). Floats are never used.
 - Network fees are paid by the payer's wallet on top of the invoice amount, calculated by that wallet (ZIP-317).
 - Zerveil never adds a fee reserve.
+
+### Currency: USD prices, shielded ZEC payments
+
+Zerveil separates what a deal is worth from what is transferred:
+
+| | Value | Where it lives |
+|---|---|---|
+| Business currency | **USD** | campaign budget, agent floors and ceilings, offers, signed terms (`currency: "USD"`), milestones, API price, credit, spending limits, analytics, receipts (`usd_amount`) |
+| Payment asset | **ZEC, shielded** (TAZ on testnet) | signed terms (`asset`), each invoice's `amount`, the ZIP-321 URI, what the scanner checks |
+| Payment network | `zcash-testnet` | signed terms and invoices |
+| Rate | USD per 1 TAZ, fixed per invoice | `usd_rate`, `rate_source`, `test_rate` on the invoice and receipt |
+
+- **Why not a stablecoin.** No USD stablecoin exists on Zcash: Zcash Shielded Assets (ZIP-226/227) run only on a
+  separate ZSA test network, with no real stablecoin issued, and are not on the Zcash testnet or mainnet. Real testnet
+  USDC exists on EVM test networks (Ethereum Sepolia, Base Sepolia), but those transfers are fully public, and this
+  project keeps shielded Zcash as its payment rail. Zerveil never labels TAZ as USD or as a stablecoin.
+- **Conversion.** An invoice converts its USD value once, when it is created, and stores the quote. The asset amount is
+  rounded **up** to the zatoshi, so the recipient never gets less than the agreed value at that rate. The scanner then
+  checks the asset amount; later rate changes never change an existing invoice.
+- **Test rate.** Testnet TAZ has no market price. `ZCASH_TEST_USD_RATE` (default 100, i.e. $100 per TAZ, so a $20 fee is
+  0.2 TAZ) is a configured number that keeps testnet amounts small. Every invoice, receipt and payment page labels
+  it "test rate — TAZ has no market price". It gives TAZ no value.
+- **Mainnet.** Pricing ZEC in USD on mainnet needs a live ZEC/USD price source and a rate-lock policy. This build has
+  neither, so it refuses mainnet pricing (and `PAYMENT_MODE=zcash` refuses mainnet anyway).
+- **API credit** is USD: a top-up credits the USD value requested (an overpayment in TAZ is recorded on the invoice,
+  not credited).
 
 ## HTTP 402 and agent spending limits
 
@@ -182,7 +213,8 @@ awaiting_payment ──(note in mempool)──► seen ──(mined)──► mi
 ```json
 {
   "error": "payment_required",
-  "payment": {"id": "PAY-…", "amount": "0.05", "ticker": "TAZ", "address": "utest1…", "memo": "ZRV1:PAY-…",
+  "payment": {"id": "PAY-…", "currency": "USD", "usd_amount": "0.05", "asset": "TAZ", "usd_rate": "100", "test_rate": true,
+              "amount": "0.0005", "ticker": "TAZ", "address": "utest1…", "memo": "ZRV1:PAY-…",
               "zip321_uri": "zcash:utest1…?amount=0.05&memo=…", "status": "awaiting_payment",
               "required_confirmations": 3, "direct": true},
   "retry_with_header": {"X-Payment-Id": "PAY-…"}
@@ -207,7 +239,7 @@ credit**:
 
 ## What you see in the app
 
-- **"Zcash Testnet — TAZ — No real monetary value"** on every page, plus a "simulated" badge on simulated records.
+- **"Zcash Testnet — test payments only — No real monetary value"** on every page, plus a "simulated" badge on simulated records.
 - **Onboarding:**
   - Creators sign in with Google (YouTube channel) and set their Unified Address and rates. They then **connect a
     receiving account**: viewing key, birthday height and explicit consent. They are listed only once connected.
@@ -415,7 +447,8 @@ See [`.env.example`](.env.example). Key settings:
 | `ZCASH_EXPLORER_TX_URL`, `ZCASH_FAUCET_URL` | –, faucet | links in the UI |
 | `ZCASH_WALLET_RPC_URL`, `ZCASH_WALLET_AUTH_TOKEN` | – | reserved; not used by the zcash-devtool backend |
 | `ADMIN_EMAILS` | – | operators (read-only scanner and audit views) |
-| `PREMIUM_SEARCH_PRICE` | 0.05 | price of the 402-gated search |
+| `ZCASH_TEST_USD_RATE` | 100 | test rate, USD per 1 TAZ, used to convert USD invoices on testnet (not a market price) |
+| `PREMIUM_SEARCH_PRICE` | 0.05 | price of the 402-gated search, in USD |
 
 ## Database and migrations
 
@@ -434,6 +467,13 @@ See [`.env.example`](.env.example). Key settings:
     - campaign status `funding` → `awaiting_payment`.
   - **Money already in an old escrow account is not touched by the migration.** Its operator must return it from that
     wallet by hand.
+- **Migration 4 (`usd_pricing`)** moves the books to USD without relabeling old numbers as dollars:
+  - existing campaigns are stamped `spec.currency = "TAZ"`; unfinished ones are closed with a reason (their amounts were
+    TAZ test units, never USD);
+  - their deals that could still move are archived, and their budget reservations released;
+  - unpaid TAZ-priced invoices are cancelled (ones already seen keep confirming);
+  - TAZ-denominated API credit is closed with one `legacy_reset` ledger entry per user.
+  - Saved agent profiles and creator rates are plain numbers and are **read as USD from now on**: review them.
 - Migration 2 (`zcash_payments`) introduced invoices, credit, spend requests and the payment audit trail.
 
 ## Tests: mocked vs real
@@ -449,6 +489,7 @@ uv run ruff check . && uv run ruff format --check .
 | `test_payments.py` | **MOCKED** (simulated scanner) | invoice states (seen/mined/confirming/confirmed/underpaid/overpaid/expired), duplicate notes, scanner failure, receipts, credit and limits |
 | `test_zcash.py` | **MOCKED** (`zcash-devtool` subprocess stubbed with canned output) | the commands we run, output parsing, NU7 status, key redaction; UA/UFVK checks, ZIP-321, memos, amounts; fail-closed config |
 | `test_policy.py` | none | terms, signatures, payee and network checks, milestone checks, delegation |
+| `test_usd_pricing.py` | none / **MOCKED** invoices | USD decimals, test-rate conversion (rounded up), mainnet refused, USD terms and the policy gate, legacy TAZ terms/campaigns/credit/receipts |
 | `test_store_postgres.py` | real PostgreSQL | store and migrations (needs `TEST_DATABASE_URL`, else skipped) |
 | `test_zcash_live.py` | **REAL testnet** | lightwalletd past NU7, viewing-key import and fresh addresses, a real received payment (needs `ZCASH_LIVE_*`, else skipped) |
 
@@ -598,6 +639,9 @@ tests/               see "Tests: mocked vs real"
 - **Tests:** end to end with the simulated scanner, and the devtool backend against a stubbed subprocess.
 
 **Not done / blockers:**
+- **No stablecoin.** Campaigns are priced in USD but paid in shielded ZEC; on testnet the USD→TAZ rate is a test rate.
+  Real USD-value settlement needs mainnet ZEC with a live price source (not implemented), or a stablecoin rail that is
+  not shielded.
 - **This project has not yet executed or observed a real testnet transaction, so there is no txid to show.** The build
   environment had no Rust toolchain (to build zcash-devtool), no Docker, and no testnet wallet or TAZ. To produce one,
   follow [Real testnet setup](#real-testnet-setup) and run `tests/test_zcash_live.py`.

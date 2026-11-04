@@ -1,8 +1,8 @@
 import { Link } from "react-router";
 import { api } from "../../api";
 import { Avatar, Card, Empty, ErrorText, Notice, Spinner, Stat } from "../../components/ui";
-import { NEEDS_PROOF, awaitingFor, receivedFor } from "../../creatorDeals";
-import { humanize, num, zec } from "../../format";
+import { NEEDS_PROOF, awaitingFor, dealCurrency, receivedFor } from "../../creatorDeals";
+import { LEGACY_ASSET, formatUsd, humanize, isUsd, money, num, sumUsd } from "../../format";
 import { useLiveEvents, useResource } from "../../live";
 import { useMe } from "../../session";
 import { DealCard } from "./MyDeals";
@@ -23,8 +23,10 @@ export function InfluencerHome() {
   );
 
   const list = deals.data ?? [];
-  const earned = list.reduce((s, d) => s + receivedFor(d), 0);
-  const requested = list.reduce((s, d) => s + awaitingFor(d), 0);
+  // USD totals over USD-priced deals, in integer cents; legacy deals (test units) are not added in
+  const usdDeals = list.filter((d) => isUsd(dealCurrency(d)));
+  const earned = sumUsd(usdDeals.map(receivedFor));
+  const requested = sumUsd(usdDeals.map(awaitingFor));
   const todo = list.filter((d) => NEEDS_PROOF.has(d.state));
 
   return (
@@ -66,8 +68,8 @@ export function InfluencerHome() {
       )}
 
       <div className="stats">
-        <Stat label="Confirmed in your wallet" value={zec(earned)} hint="Milestone payments the scanner confirmed. Not your wallet balance." />
-        <Stat label="Requested from brands" value={zec(requested)} hint="Payment requests to your wallet not yet confirmed" />
+        <Stat label="Confirmed in your wallet" value={formatUsd(earned)} hint="Milestone payments the scanner confirmed (USD value). Not your wallet balance." />
+        <Stat label="Requested from brands" value={formatUsd(requested)} hint="Payment requests to your wallet not yet confirmed" />
         <Stat label="Deals" value={list.length} />
         <Stat label="Need your video" value={todo.length} />
       </div>
@@ -106,11 +108,18 @@ export function InfluencerHome() {
               {inbox.data.map((m, i) => (
                 <li key={i}>
                   <strong>{humanize(String(m.type))}</strong> · <span className="mono">{String(m.deal_id)}</span>
-                  {m.amount !== undefined && (
+                  {m.usd_amount !== undefined ? (
                     <>
                       {" "}
-                      · {humanize(String(m.kind))} {zec(String(m.amount))}
+                      · {humanize(String(m.kind))} {formatUsd(String(m.usd_amount))}
                     </>
+                  ) : (
+                    m.amount !== undefined && (
+                      <>
+                        {" "}
+                        · {humanize(String(m.kind))} {money(String(m.amount), LEGACY_ASSET)}
+                      </>
+                    )
                   )}
                 </li>
               ))}

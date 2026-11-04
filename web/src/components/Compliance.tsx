@@ -14,7 +14,7 @@ export function ComplianceCard({ campaignId, names }: { campaignId: string; name
   const v = view.data;
   if (!v) return null;
   return (
-    <Card title="Compliance" actions={v.settlement_simulated ? <span className="chip warn" title="Payments on this server are simulated. No ZEC moves.">Simulated</span> : undefined}>
+    <Card title="Compliance" actions={v.settlement_simulated ? <span className="chip warn" title="Payments on this server are simulated. Nothing moves on-chain.">Simulated</span> : undefined}>
       <ul className="compliance-summary">
         <li>
           <span>Posts must show</span>

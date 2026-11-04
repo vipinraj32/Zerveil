@@ -1,12 +1,30 @@
 // Direct shielded Zcash payments: the checkout card for an invoice, a deal's milestones, the network/scanner panel,
 // receipts and the privacy explainers. Zerveil holds no funds: every invoice is paid straight to the recipient's own
 // wallet, and every status shown here is read from the backend (the view-only scanner's data). Nothing here marks a
-// payment done on its own. Simulated entries are labelled as such: no ZEC moved for them.
+// payment done on its own. Simulated entries are labelled as such: nothing moved on-chain for them.
 
 import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router";
 import { api } from "../api";
-import { INVOICE_STATUS, LEGACY_PAYMENT_KIND, MILESTONE_KIND, MILESTONE_STATUS, OPEN_INVOICE, PAID_INVOICE, confirmationProgress, num, txUrl, when, zec } from "../format";
+import {
+  INVOICE_STATUS,
+  LEGACY_ASSET,
+  LEGACY_PAYMENT_KIND,
+  MILESTONE_KIND,
+  MILESTONE_STATUS,
+  OPEN_INVOICE,
+  PAID_INVOICE,
+  PRICING_LINE,
+  confirmationProgress,
+  formatAsset,
+  formatUsd,
+  money,
+  num,
+  paymentAsset,
+  termsCurrency,
+  txUrl,
+  when,
+} from "../format";
 import { useSession } from "../session";
 import type { Deal, InvoiceStatus, LegacyPayout, MilestoneInvoice, MilestoneStatus, PaymentChallenge, PaymentRequest, WalletStatus } from "../types";
 import { QrCode } from "./QrCode";
@@ -61,13 +79,13 @@ export function MilestoneStatusChip({ status }: { status: MilestoneStatus }) {
 
 export function SimulatedChip({ simulated }: { simulated: boolean }) {
   return simulated ? (
-    <span className="chip warn" title="Simulated payment mode: no ZEC moved">
-      Simulated — no ZEC moved
+    <span className="chip warn" title="Simulated payment mode: nothing moved on-chain">
+      Simulated — no real payment
     </span>
   ) : null;
 }
 
-/** "Zcash Testnet — TAZ — No real monetary value", from /api/status (null on mainnet). */
+/** The server's testnet notice ("…no real monetary value"), from /api/status (null on mainnet). */
 export function TestnetNotice({ inline = false }: { inline?: boolean }) {
   const { status } = useSession();
   const notice = status?.zcash.testnet_notice;
@@ -78,6 +96,86 @@ export function TestnetNotice({ inline = false }: { inline?: boolean }) {
     <div className="testnet-banner" role="note">
       {notice}
     </div>
+  );
+}
+
+/** "Prices in USD · paid in shielded Zcash (testnet) at a test rate · no stablecoin". */
+export function PricingNotice({ inline = false }: { inline?: boolean }) {
+  const text = PRICING_LINE();
+  return inline ? <span className="testnet-chip">{text}</span> : <p className="muted small pricing-note">{text}</p>;
+}
+
+type Priced = Pick<PaymentRequest, "usd_amount" | "asset" | "usd_rate" | "rate_source" | "test_rate" | "amount" | "network" | "ticker">;
+
+const assetOf = (invoice: Priced) => invoice.asset || invoice.ticker || paymentAsset();
+const isLegacyInvoice = (invoice: Priced) => invoice.usd_amount === null || invoice.usd_amount === undefined;
+
+/** The business value of a payment request: "$20.00"; legacy requests (priced in the asset before USD pricing) show
+ * the asset amount, labelled legacy, never with a $ sign. */
+export function InvoiceHeadline({ invoice }: { invoice: Priced }) {
+  return (
+    <div className="checkout-amount">
+      {isLegacyInvoice(invoice) ? (
+        <>
+          {formatAsset(invoice.amount, assetOf(invoice))} <span>legacy (priced in {assetOf(invoice)})</span>
+        </>
+      ) : (
+        formatUsd(invoice.usd_amount)
+      )}
+    </div>
+  );
+}
+
+/** The one technical block under a payment's USD value: what the wallet actually sends (the asset, which is what the
+ * ZIP-321 request/QR asks for), the network and the test rate it was converted at. Never presents the asset as dollars. */
+export function TestPaymentBlock({ invoice }: { invoice: Priced }) {
+  const asset = assetOf(invoice);
+  const legacy = isLegacyInvoice(invoice);
+  const testnet = !invoice.network || invoice.network.endsWith("testnet");
+  const parts = [`Your wallet sends ${formatAsset(invoice.amount, asset)}`, `network ${invoice.network || "zcash-testnet"}`];
+  if (legacy) parts.push("legacy request priced in test units, before USD pricing");
+  else if (invoice.usd_rate)
+    parts.push(
+      invoice.test_rate || testnet
+        ? `converted at a test rate (${formatUsd(invoice.usd_rate)} per ${asset}), not a market price`
+        : `converted at ${formatUsd(invoice.usd_rate)} per ${asset}${invoice.rate_source ? ` (${invoice.rate_source})` : ""}`,
+    );
+  parts.push("no stablecoin");
+  return (
+    <div className="test-payment" role="note">
+      <div className="test-payment-label">{testnet ? "Test-only payment (Zcash testnet)" : "Payment (shielded Zcash)"}</div>
+      <p className="test-payment-line">{parts.join(" · ")}</p>
+    </div>
+  );
+}
+
+/** Older name of the technical block. */
+export const WalletSendsLine = TestPaymentBlock;
+
+/** "Payment details" (collapsed): the exact asset amount for the wallet (8 decimals) and what has arrived so far. */
+export function PaymentBreakdown({ invoice, copy = false, received }: { invoice: Priced; copy?: boolean; received?: string | null }) {
+  const asset = assetOf(invoice);
+  return (
+    <details className="pay-details">
+      <summary className="small">Technical payment details</summary>
+      <dl className="kv checkout-kv pay-breakdown">
+        <dt>Payment asset</dt>
+        <dd>
+          {asset} (shielded Zcash{invoice.network?.endsWith("testnet") ? ", testnet" : ""})
+        </dd>
+        <dt>Exact amount to send</dt>
+        <dd>
+          <code className="checkout-value">{formatAsset(invoice.amount, asset, 8)}</code>
+          {copy && <CopyButton value={invoice.amount} label="Copy amount" />}
+        </dd>
+        {received && Number(received) > 0 && (
+          <>
+            <dt>Received so far</dt>
+            <dd>{formatAsset(received, asset, 8)}</dd>
+          </>
+        )}
+      </dl>
+    </details>
   );
 }
 
@@ -144,7 +242,7 @@ export function ShieldedCheckout({
   const { status, me } = useSession();
   const left = useCountdown(invoice.expires_at);
   const open = OPEN_INVOICE.has(invoice.status);
-  const ticker = invoice.ticker || status?.zcash.ticker || "TAZ";
+  const asset = invoice.asset || invoice.ticker || status?.currency?.payment_asset || paymentAsset();
   const received = "received" in invoice ? invoice.received : null;
   const payPath = `/pay/${encodeURIComponent(invoice.id)}`;
   const progress = confirmationProgress(invoice);
@@ -155,15 +253,15 @@ export function ShieldedCheckout({
       <div className="checkout-head">
         <div>
           {title && <h2>{title}</h2>}
-          <div className="checkout-amount">
-            {invoice.amount} <span>{ticker}</span>
-          </div>
+          <InvoiceHeadline invoice={invoice} />
         </div>
         <div className="row">
           <InvoiceStatusChip status={invoice.status} />
           <SimulatedChip simulated={invoice.simulated} />
         </div>
       </div>
+
+      <TestPaymentBlock invoice={invoice} />
 
       <div className="checkout-body">
         <dl className="kv checkout-kv">
@@ -172,11 +270,6 @@ export function ShieldedCheckout({
             <code className="checkout-value">{invoice.address}</code>
             <CopyButton value={invoice.address} label="Copy address" />
             <div className="muted small">A fresh address of the recipient's own wallet. Zerveil never holds the money.</div>
-          </dd>
-          <dt>Amount</dt>
-          <dd>
-            <code className="checkout-value">{invoice.amount}</code> {ticker}
-            <CopyButton value={invoice.amount} label="Copy amount" />
           </dd>
           <dt>Memo</dt>
           <dd>
@@ -187,7 +280,6 @@ export function ShieldedCheckout({
           <dt>Confirmations</dt>
           <dd>
             {progress || `0 / ${invoice.required_confirmations} confirmations`}
-            {received && Number(received) > 0 && <span className="muted small"> · received {zec(received)}</span>}
           </dd>
           <dt>{open ? "Expires in" : "Expires"}</dt>
           <dd>{open && left !== null ? (left > 0 ? countdown(left) : "expired") : when(invoice.expires_at)}</dd>
@@ -202,8 +294,10 @@ export function ShieldedCheckout({
             </>
           )}
         </dl>
-        {open && showQr && <QrCode value={invoice.zip321_uri} label={`ZIP-321 payment request for ${invoice.amount} ${ticker}`} />}
+        {open && showQr && <QrCode value={invoice.zip321_uri} label={`ZIP-321 payment request for ${formatAsset(invoice.amount, asset, 8)}`} />}
       </div>
+
+      <PaymentBreakdown invoice={invoice} copy received={received} />
 
       {open && (
         <div className="row">
@@ -223,9 +317,9 @@ export function ShieldedCheckout({
                 await api.simulatePayment(invoice.id, { confirmations: invoice.required_confirmations });
                 await onChange?.();
               }}
-              title="Development only: the stand-in scanner records a payment. No ZEC moves."
+              title="Development only: the stand-in scanner records a payment. Nothing moves on-chain."
             >
-              Simulate payment (dev, no ZEC moves)
+              Simulate payment (dev, nothing moves on-chain)
             </ActionButton>
           )}
         </div>
@@ -267,7 +361,7 @@ export function PrivacyNote({ compact = false }: { compact?: boolean }) {
         </li>
         {notice && (
           <li>
-            <strong>Testnet.</strong> {notice}.{status?.payments_simulated && " Simulated payments are on: no ZEC moves at all."}
+            <strong>Testnet.</strong> {notice}.{status?.payments_simulated && " Simulated payments are on: nothing moves on-chain at all."}
           </li>
         )}
       </ul>
@@ -279,8 +373,8 @@ type Step = { label: string; done: boolean; detail?: string; bad?: boolean };
 
 const VERIFIED_AT_LEAST = new Set(["VERIFIED", "PERFORMANCE_DUE", "COMPLETED"]);
 
-function milestoneDetail(amount: string, status: MilestoneStatus, at: string | null, views?: number | null): string {
-  const parts = [zec(amount)];
+function milestoneDetail(amount: string, currency: string, status: MilestoneStatus, at: string | null, views?: number | null): string {
+  const parts = [money(amount, currency, true)];
   if (views != null) parts.push(`for ${views.toLocaleString()} views`);
   parts.push(MILESTONE_STATUS[status]?.label.toLowerCase() ?? status);
   if (at) parts.push(when(at));
@@ -291,13 +385,14 @@ function steps(d: Deal): Step[] {
   const fixed = d.milestones.find((m) => m.kind === "fixed");
   const perf = d.milestones.find((m) => m.kind === "performance");
   const verified = VERIFIED_AT_LEAST.has(d.state);
+  const currency = termsCurrency(d.terms);
   const list: Step[] = [];
   if (fixed)
     list.push({
       label: fixed.status === "confirmed" ? "Fixed fee confirmed in creator's wallet" : "Fixed fee paid directly to the creator",
       done: fixed.status === "confirmed",
       bad: fixed.status === "expired",
-      detail: milestoneDetail(fixed.amount, fixed.status, fixed.confirmed_at ?? fixed.requested_at),
+      detail: milestoneDetail(fixed.amount, currency, fixed.status, fixed.confirmed_at ?? fixed.requested_at),
     });
   else if (d.terms && Number(d.terms.fixed_fee) === 0) list.push({ label: "No upfront payment (CPM only)", done: true });
   list.push({ label: "Proof submitted", done: !!d.proof, detail: d.proof ? when(d.proof.submitted_at) : undefined });
@@ -312,7 +407,7 @@ function steps(d: Deal): Step[] {
           label: perf.status === "confirmed" ? "Performance fee confirmed in creator's wallet" : "Performance fee",
           done: perf.status === "confirmed" || perf.status === "waived",
           bad: perf.status === "expired",
-          detail: milestoneDetail(perf.amount, perf.status, perf.confirmed_at ?? perf.requested_at ?? perf.due_at, perf.views),
+          detail: milestoneDetail(perf.amount, currency, perf.status, perf.confirmed_at ?? perf.requested_at ?? perf.due_at, perf.views),
         }
       : { label: "Performance fee", done: false, detail: d.performance_due ? `views measured ${when(d.performance_due)}` : undefined },
   );
@@ -345,13 +440,14 @@ export function PaymentLifecycle({ deal }: { deal: Deal }) {
 export function MilestoneTable({ deal, invoices }: { deal: Deal; invoices?: MilestoneInvoice[] }) {
   if (deal.milestones.length === 0) return <p className="muted small">No payment milestones yet: they are scheduled when the advertiser accepts the agreement.</p>;
   const byMilestone = new Map((invoices ?? []).map((i) => [i.milestone_id, i]));
+  const currency = termsCurrency(deal.terms);
   return (
     <div className="table-scroll">
       <table className="table compact pay-tx">
         <thead>
           <tr>
             <th>Milestone</th>
-            <th>Amount</th>
+            <th>Amount{currency === "USD" ? " ($)" : ""}</th>
             <th>Status</th>
             <th>Payment request</th>
             <th>Receipt</th>
@@ -367,7 +463,7 @@ export function MilestoneTable({ deal, invoices }: { deal: Deal; invoices?: Mile
                   {m.views != null && <div className="muted small">{num(m.views)} verified views</div>}
                   {m.due_at && m.status === "scheduled" && <div className="muted small">due {when(m.due_at)}</div>}
                 </td>
-                <td>{zec(m.amount)}</td>
+                <td>{money(m.amount, currency, true)}</td>
                 <td>
                   <MilestoneStatusChip status={m.status} />
                   {m.confirmed_at && <div className="muted small">{when(m.confirmed_at)}</div>}
@@ -401,7 +497,7 @@ export function MilestoneTable({ deal, invoices }: { deal: Deal; invoices?: Mile
           })}
         </tbody>
       </table>
-      {deal.payment_simulated && <p className="muted small">Confirmed by the simulated scanner: no ZEC moved.</p>}
+      {deal.payment_simulated && <p className="muted small">Confirmed by the simulated scanner: nothing moved on-chain.</p>}
     </div>
   );
 }
@@ -426,7 +522,7 @@ export function LegacyPaymentHistory({ payouts }: { payouts: LegacyPayout[] }) {
             {payouts.map((p, i) => (
               <tr key={p.payout_id || i}>
                 <td>{LEGACY_PAYMENT_KIND[p.kind] ?? p.kind}</td>
-                <td>{zec(p.amount)}</td>
+                <td>{money(p.amount, LEGACY_ASSET, true)}</td>
                 <td className="small">{when(p.at)}</td>
                 <td>{p.legacy_tx_hash ? <span className="mono small">{p.legacy_tx_hash.slice(0, 12)}…</span> : <SimulatedChip simulated={p.simulated} />}</td>
               </tr>
@@ -476,8 +572,8 @@ export function WalletStatusPanel() {
             <dd>{w.receiving_account_connected ? <span className="badge tone-good">viewing key connected</span> : <span className="badge tone-warn">not connected</span>}</dd>
             <dt>Confirmed received via Zerveil</dt>
             <dd>
-              {zec(w.confirmed_received_via_zerveil)}
-              <div className="muted small">What the scanner confirmed arriving through Zerveil requests. Not your wallet balance.</div>
+              {formatUsd(w.confirmed_received_usd)} — not a wallet balance
+              <div className="muted small">The dollar value of the requests the scanner confirmed arriving through Zerveil.</div>
             </dd>
           </>
         )}
@@ -498,7 +594,7 @@ export function WalletStatusPanel() {
           <a href={w.faucet_url} target="_blank" rel="noreferrer">
             Testnet faucet ↗
           </a>{" "}
-          <span className="muted">— you claim TAZ yourself, into your own wallet. TAZ has no real monetary value.</span>
+          <span className="muted">— you claim TAZ (the payment asset) yourself, into your own wallet. TAZ has no real monetary value.</span>
         </p>
       )}
     </div>

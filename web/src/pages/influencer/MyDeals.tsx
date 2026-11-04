@@ -173,7 +173,7 @@ export function DealCard({ deal: d }: { deal: InfluencerDeal }) {
         <dl className="md-facts">
           <div>
             <dt>{pay?.final ? "Agreed pay" : "Proposed pay"}</dt>
-            <dd>{pay ? termsText(pay, pay.model) : "No offer yet"}</dd>
+            <dd>{pay ? termsText(pay, pay.model, pay.currency) : "No offer yet"}</dd>
           </div>
           <div>
             <dt>Deliverable</dt>

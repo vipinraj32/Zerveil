@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import { api, ApiError } from "./api";
-import { setTicker } from "./format";
+import { setPaymentAsset } from "./format";
 import { closeStream } from "./live";
 import type { Me, PlatformStatus } from "./types";
 
@@ -25,7 +25,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     if (meResult.status === "fulfilled") setMe(meResult.value);
     else if (meResult.reason instanceof ApiError && meResult.reason.status === 401) setMe(null);
     if (statusResult.status === "fulfilled") {
-      setTicker(statusResult.value.zcash?.ticker);
+      setPaymentAsset(statusResult.value.currency?.payment_asset ?? statusResult.value.zcash?.ticker);
       setStatus(statusResult.value);
     }
     setLoading(false);

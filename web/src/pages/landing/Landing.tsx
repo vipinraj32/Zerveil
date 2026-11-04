@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { Link } from "react-router";
 import { LazyMotion, MotionConfig, domAnimation, m as motion, useMotionValueEvent, useReducedMotion, useScroll, useSpring } from "motion/react";
 import { Logo } from "../../components/Logo";
+import { centsToString, formatUsd } from "../../format";
 import { useSession } from "../../session";
 import { Cta, Icon, Status, StatusTag } from "./parts";
 import "./landing.css";
@@ -312,7 +313,8 @@ function dealPay(fixedAmt: number, cpmAmt: number, capAmt: number, views: number
   return { fixed, performance, unused: cap - fixed - performance, cap, capped: variable > performance };
 }
 
-const taz = (c: number) => `${(c / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} TAZ`;
+/** Integer cents → "$40.00" (the app-wide USD formatter; no float formatting). */
+const usdCents = (c: number) => formatUsd(centsToString(BigInt(c)));
 
 type RangeProps = { id: string; label: string; value: number; min: number; max: number; step: number; onChange: (v: number) => void; format: (v: number) => string };
 
@@ -344,7 +346,7 @@ function PaymentCalculator() {
         <motion.div className="lp-pay-head" {...reveal()}>
           <p className="lp-eyebrow">Payment math</p>
           <h2 id="pay-math-title">See what a deal pays</h2>
-          <p>Move the sliders to see what a deal pays in shielded TAZ (testnet ZEC). The fixed fee is paid when you accept the deal, the per-1K-view fee after the measuring window — each straight from your wallet to the creator's. Anything under the cap is simply never requested.</p>
+          <p>Move the sliders to see what a deal pays. Prices are in USD; on testnet each payment is sent in shielded Zcash at a test rate. The fixed fee is paid when you accept the deal, the per-1K-view fee after the measuring window — each straight from your wallet to the creator's. Anything under the cap is simply never requested.</p>
         </motion.div>
         <div className="lp-calc">
           <motion.div className="lp-calc-inputs" {...reveal(0.05)}>
@@ -355,13 +357,13 @@ function PaymentCalculator() {
               min={0}
               max={200}
               step={1}
-              format={(v) => `${v} TAZ`}
+              format={(v) => formatUsd(v)}
               onChange={(v) => {
                 setFixed(v);
                 if (v > cap) setCap(Math.ceil(v / 5) * 5);
               }}
             />
-            <Range id="calc-cpm" label="Per 1K views" value={cpm} min={0} max={10} step={0.1} format={(v) => `${v.toFixed(2)} TAZ`} onChange={setCpm} />
+            <Range id="calc-cpm" label="Per 1K views" value={cpm} min={0} max={10} step={0.1} format={(v) => formatUsd(v)} onChange={setCpm} />
             <Range
               id="calc-cap"
               label="Cap"
@@ -369,7 +371,7 @@ function PaymentCalculator() {
               min={10}
               max={500}
               step={5}
-              format={(v) => `${v} TAZ`}
+              format={(v) => formatUsd(v)}
               onChange={(v) => {
                 setCap(v);
                 if (fixed > v) setFixed(v);
@@ -380,10 +382,10 @@ function PaymentCalculator() {
           <motion.div className="lp-calc-out" aria-live="polite" {...reveal(0.15)}>
             <p className="lp-calc-total">
               <span>Creator is paid</span>
-              <strong>{taz(r.fixed + r.performance)}</strong>
-              <small>of a {taz(r.cap)} cap, directly to their wallet</small>
+              <strong>{usdCents(r.fixed + r.performance)}</strong>
+              <small>of a {usdCents(r.cap)} cap, directly to their wallet</small>
             </p>
-            <div className="lp-stack" role="img" aria-label={`Fixed ${taz(r.fixed)}, performance ${taz(r.performance)}, not requested ${taz(r.unused)}`}>
+            <div className="lp-stack" role="img" aria-label={`Fixed ${usdCents(r.fixed)}, performance ${usdCents(r.performance)}, not requested ${usdCents(r.unused)}`}>
               <span className="lp-s-fixed" style={{ width: w(r.fixed) }} />
               <span className="lp-s-perf" style={{ width: w(r.performance) }} />
               <span className="lp-s-unused" style={{ width: w(r.unused) }} />
@@ -393,23 +395,23 @@ function PaymentCalculator() {
                 <dt>
                   <i className="lp-s-fixed" /> Fixed
                 </dt>
-                <dd>{taz(r.fixed)}</dd>
+                <dd>{usdCents(r.fixed)}</dd>
               </div>
               <div>
                 <dt>
                   <i className="lp-s-perf" /> Performance
                 </dt>
-                <dd>{taz(r.performance)}</dd>
+                <dd>{usdCents(r.performance)}</dd>
                 {r.capped && <small>cap reached</small>}
               </div>
               <div>
                 <dt>
                   <i className="lp-s-unused" /> Not requested
                 </dt>
-                <dd>{taz(r.unused)}</dd>
+                <dd>{usdCents(r.unused)}</dd>
               </div>
             </dl>
-            <p className="lp-calc-note">Example numbers · testnet TAZ has no monetary value</p>
+            <p className="lp-calc-note">Example numbers · testnet payments have no monetary value</p>
           </motion.div>
         </div>
       </div>
@@ -513,7 +515,7 @@ function Features() {
 }
 
 const FAQ = [
-  { q: "Does real money move today?", a: "No. Zerveil runs on Zcash testnet, where TAZ has no monetary value, and simulated payment mode is the default: in that mode no ZEC moves at all and every payment is labelled simulated." },
+  { q: "Does real money move today?", a: "No. Zerveil runs on Zcash testnet, where test coins have no monetary value, and simulated payment mode is the default: in that mode nothing moves on-chain at all and every payment is labelled simulated." },
   { q: "Does Zerveil hold my money?", a: "No. Advertisers pay each creator directly, from their own wallet to a fresh address of the creator's own wallet. Zerveil only requests payments and confirms they arrived; it never holds, forwards or returns funds." },
   { q: "What can Zerveil see?", a: "Payments are shielded, so amounts, senders and memos are encrypted on-chain. Creators connect a viewing key of a dedicated receiving account: it lets Zerveil's scanner see that account's transactions to confirm payments, and it cannot spend. Creators' addresses are private to them and the operator." },
   { q: "Can the AI spend my budget?", a: "No. The LLM only proposes. Deterministic code checks every offer against your limits, you accept each campaign's deals, and you sign every creator payment yourself in your own wallet. Your agent can only spend prepaid API credit, within your spending limits." },

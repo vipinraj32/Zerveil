@@ -33,6 +33,7 @@ from ..models import (
     new_id,
     transition_allowed,
 )
+from ..money import usd
 from ..payments.models import Invoice
 from ..payments.service import PaymentError, PaymentService
 from ..policy import PolicyResult, check_milestone, check_terms, evidence_hash, performance_payout
@@ -549,11 +550,14 @@ class DealService:
 
     async def _request_milestone(self, deal: Deal, kind: str, amount: Decimal, *, views: int | None = None, by: str = "scheduler") -> Deal:
         """Decides one milestone payment and issues its invoice: paid by the advertiser, from their own wallet,
-        directly to a fresh address of the creator's own receiving account. Idempotent per deal and kind."""
+        directly to a fresh address of the creator's own receiving account. Idempotent per deal and kind.
+        `amount` is USD; the invoice converts it into the payment asset at a quote it stores."""
         terms = self._terms(deal)
         spec = (await self.campaign(deal.campaign_id)).spec
         if (existing := deal.milestone(kind)) is not None and existing.invoice_id:
             return deal
+        if terms.currency != "USD" or spec.currency != "USD":
+            raise DealError("this deal was priced in TAZ before USD pricing: no payment can be requested for it")
         check = check_milestone(terms, kind, amount)
         if not check.ok:
             await self.audit(deal.campaign_id, deal.id, "policy", "milestone_refused", kind=kind, violations=check.violations)
@@ -570,9 +574,10 @@ class DealService:
         if existing is None:
             deal.milestones.append(milestone)
         deal = await self.save(deal)
-        await self.audit(deal.campaign_id, deal.id, "payments", "milestone_requested", milestone=milestone.id, kind=kind, amount=amount,
-                         invoice=invoice.id, views=views, evidence_hash=milestone.evidence_hash, by=by, simulated=invoice.simulated)  # fmt: skip
-        await self.notify_influencer(deal, "payment_requested", kind=kind, amount=amount, invoice=invoice.id, simulated=invoice.simulated)
+        await self.audit(deal.campaign_id, deal.id, "payments", "milestone_requested", milestone=milestone.id, kind=kind, usd_amount=amount,
+                         asset_amount=invoice.amount, asset=invoice.asset, test_rate=invoice.test_rate, invoice=invoice.id, views=views,
+                         evidence_hash=milestone.evidence_hash, by=by, simulated=invoice.simulated)  # fmt: skip
+        await self.notify_influencer(deal, "payment_requested", kind=kind, usd_amount=amount, invoice=invoice.id, simulated=invoice.simulated)
         return deal
 
     async def request_payment(self, campaign_id: str, deal_ids: list[str], by: str) -> list[Invoice]:
@@ -604,7 +609,7 @@ class DealService:
             assert milestone is not None and milestone.invoice_id
             invoices.append(await self.payments.get_invoice(milestone.invoice_id))
         await self.audit(campaign_id, None, "advertiser-agent", "payment_requested", invoices=[i.id for i in invoices], deals=deal_ids, by=by,
-                         total=sum((i.amount for i in invoices), Decimal("0")))  # fmt: skip
+                         total_usd=sum((i.usd_amount or Decimal("0") for i in invoices), Decimal("0")))  # fmt: skip
         await self.refresh_campaign_status(campaign_id)
         return invoices
 
@@ -643,7 +648,7 @@ class DealService:
                                      receipt=invoice.receipt_id, simulated=invoice.simulated)  # fmt: skip
                     if milestone.kind == "fixed" and deal.state in (DealState.PAYMENT_REQUESTED, DealState.PAYMENT_PENDING):
                         await self.save(deal, DealState.CONTENT_CREATION)
-                        await self.notify_influencer(deal, "payment_confirmed", kind="fixed", amount=invoice.received, receipt=invoice.receipt_id,
+                        await self.notify_influencer(deal, "payment_confirmed", kind="fixed", usd_amount=milestone.amount, receipt=invoice.receipt_id,
                                                      simulated=invoice.simulated)  # fmt: skip
                     elif milestone.kind == "performance" and deal.state == DealState.PERFORMANCE_DUE:
                         await self.save(deal, DealState.COMPLETED)
@@ -666,15 +671,16 @@ class DealService:
             await self.refresh_campaign_status(invoice.campaign_id)
 
     async def payment_summary(self, campaign_id: str) -> dict[str, str]:
-        """Budget is a spending limit, not money held: reserved = caps of deals that may still be paid or were paid;
-        paid = milestone payments the scanner confirmed in creators' wallets."""
-        spec = (await self.campaign(campaign_id)).spec
+        """In the campaign's currency (USD). Budget is a spending limit, not money held: reserved = caps of deals that
+        may still be paid or were paid; paid = milestone payments the scanner confirmed in creators' wallets."""
+        campaign = await self.campaign(campaign_id)
+        spec = campaign.spec
         reserved = await self.ctx.store.reserved_budget(campaign_id)
         deals = await self.ctx.store.list_deals(campaign_id)
         paid = sum((m.amount for d in deals for m in d.milestones if m.status == "confirmed"), Decimal("0"))
         requested = sum((m.amount for d in deals for m in d.milestones if m.status in ("requested", "pending")), Decimal("0"))
-        return {"budget": str(spec.budget), "reserved": str(reserved), "paid": str(paid), "requested": str(requested),
-                "remaining": str(spec.budget - reserved)}  # fmt: skip
+        money = {"budget": spec.budget, "reserved": reserved, "paid": paid, "requested": requested, "remaining": spec.budget - reserved}
+        return {"currency": spec.currency, **{k: str(usd(v)) for k, v in money.items()}}
 
     def _deal_lock(self, deal_id: str) -> asyncio.Lock:
         return self._deal_locks.setdefault(deal_id, asyncio.Lock())

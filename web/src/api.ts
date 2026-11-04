@@ -121,7 +121,7 @@ export const api = {
   disconnectReceivingAccount: () => request<ReceivingAccountView>("DELETE", "/api/receiving-account"),
   receipts: () => get<Receipt[]>("/api/receipts"),
   receipt: (id: string) => get<Receipt>(`/api/receipts/${encodeURIComponent(id)}`),
-  /** Dev only (simulated payments): pretend a shielded payment arrived. No ZEC moves. */
+  /** Dev only (simulated payments): pretend a shielded payment arrived. Nothing moves on-chain. */
   simulatePayment: (id: string, body: { amount?: string; confirmations?: number } = {}) =>
     post<PaymentRequest>(`/api/dev/payments/${encodeURIComponent(id)}/simulate`, body),
 

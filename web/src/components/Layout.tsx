@@ -116,12 +116,14 @@ export function Layout() {
         </header>
         <div className="netbar" role="status">
           {status?.zcash.testnet_notice ? (
-            <span className="testnet-chip testnet-notice">{status.zcash.testnet_notice}</span>
+            <span className="testnet-chip testnet-notice" title={status.zcash.testnet_notice}>
+              Prices in USD · Zcash testnet · no real monetary value
+            </span>
           ) : (
-            <span className="testnet-chip">Zcash {status?.zcash.network ?? "testnet"}</span>
+            <span className="testnet-chip">Prices in USD · Zcash {status?.zcash.network ?? "testnet"}</span>
           )}
           <span className="testnet-chip">Direct payments · Zerveil holds no funds</span>
-          {status?.payments_simulated && <span className="testnet-chip warn">Simulated — no ZEC moved</span>}
+          {status?.payments_simulated && <span className="testnet-chip warn">Simulated — no real payments</span>}
         </div>
         <main className="main">
           <Outlet />

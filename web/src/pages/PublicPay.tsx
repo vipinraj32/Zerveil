@@ -6,9 +6,9 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
 import { api } from "../api";
 import { Logo } from "../components/Logo";
-import { PrivacyNote, ShieldedCheckout } from "../components/Payments";
+import { PricingNotice, PrivacyNote, ShieldedCheckout } from "../components/Payments";
 import { Card, ErrorText, Notice, Spinner } from "../components/ui";
-import { PAID_INVOICE, PURPOSE_LABEL, confirmationProgress, when, zec } from "../format";
+import { PAID_INVOICE, PURPOSE_LABEL, confirmationProgress, formatAsset, requestValue, when } from "../format";
 import { useSession } from "../session";
 import type { PaymentRequest } from "../types";
 
@@ -51,7 +51,7 @@ export function PublicPay() {
         </Link>
         <div className="row">
           {notice && <span className="testnet-chip">{notice}</span>}
-          {status?.payments_simulated && <span className="testnet-chip warn">Simulated — no ZEC moved</span>}
+          {status?.payments_simulated && <span className="testnet-chip warn">Simulated — no real payments</span>}
         </div>
       </header>
 
@@ -61,6 +61,7 @@ export function PublicPay() {
             {notice}
           </div>
         )}
+        <PricingNotice />
         {error && !invoice ? (
           <Card title="Payment not found">
             <ErrorText error={error} />
@@ -85,10 +86,10 @@ export function PublicPay() {
 
             {PAID_INVOICE.has(invoice.status) && (
               <Notice tone="good">
-                Confirmed{invoice.paid_at ? ` on ${when(invoice.paid_at)}` : ""}: {zec(invoice.received || invoice.amount)} arrived in the recipient's wallet with{" "}
+                Confirmed{invoice.paid_at ? ` on ${when(invoice.paid_at)}` : ""}: {requestValue(invoice)} arrived in the recipient's wallet with{" "}
                 {invoice.confirmations} confirmations.
                 {invoice.status === "overpaid" && " More than the requested amount arrived; settle the difference with the recipient."} Thank you.
-                {invoice.simulated && " (Simulated — no ZEC moved.)"}
+                {invoice.simulated && " (Simulated — no real payment.)"}
               </Notice>
             )}
             {(invoice.status === "seen" || invoice.status === "mined" || invoice.status === "confirming") && (
@@ -98,7 +99,7 @@ export function PublicPay() {
             )}
             {invoice.status === "underpaid" && (
               <Notice tone="warn">
-                Only {zec(invoice.received)} of {zec(invoice.amount)} arrived. Send the rest with the same memo before the request expires.
+                Only {formatAsset(invoice.received, invoice.asset || invoice.ticker)} of {formatAsset(invoice.amount, invoice.asset || invoice.ticker, 8)} arrived. Send the rest with the same memo before the request expires.
               </Notice>
             )}
             {invoice.status === "expired" && <Notice tone="warn">This payment request expired. Ask for a new link; do not send to this address.</Notice>}
@@ -116,7 +117,10 @@ export function PublicPay() {
             <Card title="How to pay">
               <ol className="small paypage-steps">
                 <li>Open a Zcash wallet that supports shielded Unified Addresses ({testnet ? "on testnet" : "mainnet"}).</li>
-                <li>Use "Open in wallet", or copy the address, the exact amount and the memo.</li>
+                <li>
+                  Use "Open in wallet", or copy the address, the exact amount (under Technical payment details) and the memo. Your wallet sends shielded testnet
+                  Zcash, converted from the USD amount once, at a test rate.
+                </li>
                 <li>
                   Send. The status moves from Payment seen to Mined and Confirming, then Confirmed after {invoice.required_confirmations} confirmations.
                 </li>

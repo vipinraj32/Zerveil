@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import { MODEL_LABEL, humanize, termsText, zec } from "../format";
+import { MODEL_LABEL, centsToString, humanize, money, termsText, toCents } from "../format";
 import { useLiveEvents, useResource } from "../live";
 import { useSession } from "../session";
 import type { AuditEvent, Deal } from "../types";
 import { Avatar, Empty, Spinner } from "./ui";
 
 /** The A2A negotiation of one deal as a conversation: your agent's offers on the right, the creator agent's replies on the left. */
-export function A2AChat({ deal, creator, avatar }: { deal: Deal; creator: string; avatar?: string }) {
+export function A2AChat({ deal, creator, avatar, currency = "USD" }: { deal: Deal; creator: string; avatar?: string; currency?: string }) {
   const view = useResource(() => api.negotiation(deal.id), `neg:${deal.id}`);
   useLiveEvents((e) => e.deal_id === deal.id, view.reload);
   const end = useRef<HTMLDivElement>(null);
@@ -38,7 +38,7 @@ export function A2AChat({ deal, creator, avatar }: { deal: Deal; creator: string
               <div className="msg msg-out">
                 <div className="bubble">
                   <small>Your agent · offer</small>
-                  <strong>{termsText(r.advertiser_offer, model)}</strong>
+                  <strong>{termsText(r.advertiser_offer, model, currency)}</strong>
                 </div>
               </div>
             )}
@@ -48,7 +48,7 @@ export function A2AChat({ deal, creator, avatar }: { deal: Deal; creator: string
                 <small>
                   {creator}’s agent · {humanize(r.reply)}
                 </small>
-                {r.counter && <strong>{termsText(r.counter, model)}</strong>}
+                {r.counter && <strong>{termsText(r.counter, model, currency)}</strong>}
                 {r.explanation && <span>{r.explanation}</span>}
               </div>
             </div>
@@ -70,8 +70,9 @@ const DAY = 86_400_000;
 
 type Metric = { key: string; label: string; total: string; points: number[] };
 
-/** Daily counts from the campaign's own audit log, from its first event to today. */
-export function ActivityChart({ events, deals }: { events: AuditEvent[]; deals: Deal[] }) {
+/** Daily counts from the campaign's own audit log, from its first event to today. Money is in the campaign's currency
+ * (USD; legacy campaigns: test units), summed in integer cents. */
+export function ActivityChart({ events, deals, currency = "USD" }: { events: AuditEvent[]; deals: Deal[]; currency?: string }) {
   const [metric, setMetric] = useState("events");
   const [hover, setHover] = useState<number | null>(null);
   if (events.length === 0) return <Empty>No activity yet. The chart fills in as the agents work.</Empty>;
@@ -85,9 +86,11 @@ export function ActivityChart({ events, deals }: { events: AuditEvent[]; deals: 
     for (const e of events) if (pick(e)) out[bucket(e.at)] += 1;
     return out;
   };
-  const paid = new Array<number>(days).fill(0);
+  const paid = new Array<number>(days).fill(0); // cents
   // milestone payments the scanner confirmed in creators' wallets
-  for (const m of deals.flatMap((d) => d.milestones ?? [])) if (m.status === "confirmed" && m.confirmed_at) paid[bucket(m.confirmed_at)] += Number(m.amount);
+  for (const m of deals.flatMap((d) => d.milestones ?? []))
+    if (m.status === "confirmed" && m.confirmed_at) paid[bucket(m.confirmed_at)] += Number(toCents(m.amount) ?? 0n);
+  const cents = (v: number) => money(centsToString(BigInt(Math.round(v))), currency, true);
   const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
 
   const metrics: Metric[] = [
@@ -98,7 +101,7 @@ export function ActivityChart({ events, deals }: { events: AuditEvent[]; deals: 
       total: String(sum(count((e) => e.kind.startsWith("negotiation")))),
       points: count((e) => e.kind.startsWith("negotiation")),
     },
-    { key: "paid", label: "Paid to creators", total: zec(sum(paid)), points: paid },
+    { key: "paid", label: "Paid to creators", total: cents(sum(paid)), points: paid },
   ];
   const m = metrics.find((x) => x.key === metric) ?? metrics[0];
   const max = Math.max(1, ...m.points);
@@ -108,7 +111,7 @@ export function ActivityChart({ events, deals }: { events: AuditEvent[]; deals: 
   const y = (v: number) => H - (v / max) * (H - 8);
   const line = m.points.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
   const label = (i: number) => new Date(start.getTime() + i * DAY).toLocaleDateString("en-US", { month: "short", day: "numeric" });
-  const fmt = (v: number) => (m.key === "paid" ? zec(v) : String(v));
+  const fmt = (v: number) => (m.key === "paid" ? cents(v) : String(v));
   const h = hover ?? days - 1;
 
   return (
@@ -155,7 +158,7 @@ export function ActivityChart({ events, deals }: { events: AuditEvent[]; deals: 
         </div>
         <div className="act-y">
           <span>{fmt(max)}</span>
-          <span>0</span>
+          <span>{fmt(0)}</span>
         </div>
       </div>
     </div>

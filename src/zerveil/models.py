@@ -199,6 +199,9 @@ class CampaignSpec(BaseModel):
     advertiser: str
     brand_handle: str  # must appear in the video description, e.g. "@fitfuel"
     niche: str
+    # Every amount in a campaign (budget, ceilings, terms, milestones) is in `currency`: USD. Campaigns created before
+    # USD pricing are stamped "TAZ" by migration 4: their amounts were TAZ test units, never USD, and they are closed.
+    currency: str = "USD"
     budget: Decimal
     max_creators: int = 3
     min_subscribers: int = 0
@@ -295,6 +298,10 @@ class DealTerms(BaseModel):
     influencer_id: str
     channel_id: str
     payee: str  # the creator's shielded Unified Address
+    # currency: what fixed_fee / cpm / cap are in (USD). asset/network: what the advertiser actually pays and where
+    # (shielded ZEC, TAZ on testnet), converted at a rate quoted on each invoice. Terms signed before USD pricing have
+    # currency None: their amounts were TAZ, and the field is left out of their signed payload so old signatures hold.
+    currency: str | None = None
     asset: str = "ZEC"  # TAZ on testnet
     network: str = "zcash-testnet"
     compensation_model: CompensationModel = "hybrid"
@@ -316,7 +323,7 @@ class DealTerms(BaseModel):
     influencer_signature: str = ""
 
     def signing_payload(self) -> dict[str, Any]:
-        return self.model_dump(mode="json", exclude={"influencer_signature"})
+        return self.model_dump(mode="json", exclude={"influencer_signature", *(("currency",) if self.currency is None else ())})
 
     def terms_hash(self) -> str:
         canonical = json.dumps(self.signing_payload(), sort_keys=True, separators=(",", ":"))
@@ -478,7 +485,7 @@ MilestoneStatus = Literal["scheduled", "requested", "pending", "confirmed", "exp
 class Milestone(BaseModel):
     """One payment of a deal, decided by deterministic code and requested as its own invoice, paid by the advertiser
     directly to the creator's wallet. `fixed` is requested when the advertiser accepts the agreement; `performance`
-    is computed from verified views at T+7d."""
+    is computed from verified views at T+7d. `amount` is USD; the invoice holds the asset amount actually paid."""
 
     id: str  # MS-…
     kind: Literal["fixed", "performance"]

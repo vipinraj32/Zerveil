@@ -5,10 +5,10 @@
     hybrid  payable = min(cap, fixed fee + eligible_views / 1000 × CPM)
 
 Eligible views are the YouTube viewCount read `views_measured_after_days` after publishing, for a post
-that is still public and still passes its proof checks (verifier). Amounts round down to 0.01 ZEC. The
+that is still public and still passes its proof checks (verifier). Amounts are USD and round down to $0.01. The
 cap is always required: it bounds the most a deal can ever pay (reserved from the campaign budget).
 
-Example: hybrid, 19 fixed + 2.50 CPM, 10,000 eligible views, 40 cap → 19 + 25 = 44 → capped at 40 (amounts in ZEC; TAZ on testnet).
+Example: hybrid, 19 fixed + 2.50 CPM, 10,000 eligible views, 40 cap → 19 + 25 = 44 → capped at 40 (amounts in USD).
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ def rules() -> dict[str, object]:
         },
         "eligible_views": "YouTube viewCount read N days after publishing (N is in the signed terms), only while the post "
         "is public and passes its proof checks",
-        "rounding": "down to 0.01 ZEC",
+        "rounding": "down to $0.01 (amounts are USD)",
         "unpaid_remainder": "never requested: each milestone is paid directly to the creator, so nothing is held or refunded",
         "example": example.as_dict(),
     }

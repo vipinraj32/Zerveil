@@ -1,5 +1,6 @@
 """Direct Zcash payment endpoints. Zerveil holds no funds: every invoice is paid straight to the recipient's own wallet
-and confirmed by the view-only scanner.
+and confirmed by the view-only scanner. Amounts users enter (links, top-ups) and every business total are USD; each
+invoice also carries the asset amount to pay (shielded ZEC, TAZ on testnet) and the rate it was converted at.
 
 GET  /api/pay/{id}                          public payment page data (no transaction ids, no campaign terms)
 GET  /api/payments/invoices[/{id}]          invoices the caller pays or receives; one with its notes and audit trail
@@ -40,12 +41,12 @@ PREMIUM_CATEGORY = "premium_search"
 
 class LinkIn(BaseModel):
     title: str = Field(min_length=2, max_length=120)
-    amount: Decimal = Field(gt=0, le=10_000, decimal_places=8)
+    amount: Decimal = Field(gt=0, le=10_000, decimal_places=2)  # USD
     description: str = Field(default="", max_length=500)
 
 
 class TopupIn(BaseModel):
-    amount: Decimal = Field(gt=0, le=1_000, decimal_places=8)
+    amount: Decimal = Field(gt=0, le=1_000, decimal_places=2)  # USD
 
 
 class ViewingKeyIn(BaseModel):
@@ -166,8 +167,12 @@ def register_payment_routes(
         invoices = await state.ctx.store.list_invoices(campaign_id=campaign_id, purpose="milestone")
         open_ = [i for i in invoices if i.status == "awaiting_payment" and not i.notes]
         uri = multi_payment_uri([(i.address, i.amount, i.memo, i.title) for i in open_]) if open_ else None
-        return {"invoices": [party_view(i) for i in invoices], "pay_all_uri": uri,
-                "open_total": str(sum((i.amount for i in open_), Decimal("0"))), "summary": await state.deals.payment_summary(campaign_id)}  # fmt: skip
+        assets = sorted({i.asset for i in open_ if i.asset})
+        return {"invoices": [party_view(i) for i in invoices], "pay_all_uri": uri, "currency": "USD",
+                "open_total_usd": str(sum((i.usd_amount or Decimal("0") for i in open_), Decimal("0"))),
+                "open_total": str(sum((i.amount for i in open_), Decimal("0"))),  # asset amount to pay for all open invoices
+                "open_asset": assets[0] if len(assets) == 1 else None,
+                "summary": await state.deals.payment_summary(campaign_id)}  # fmt: skip
 
     # ---- receiving account (viewing key) -----------------------------------------------------------------------
 
@@ -232,8 +237,9 @@ def register_payment_routes(
     async def wallet_status(user: CurrentUser) -> dict[str, Any]:
         info = await state.ctx.wallet.info()
         account = await payments().receiving_account(user.id)
-        received = sum((i.received for i in await state.ctx.store.list_invoices() if i.recipient_id == user.id and i.is_paid
-                        and i.paid_via == "shielded"), Decimal("0"))  # fmt: skip
+        mine = [i for i in await state.ctx.store.list_invoices() if i.recipient_id == user.id and i.is_paid and i.paid_via == "shielded"]
+        received = sum((i.received for i in mine), Decimal("0"))
+        received_usd = sum((i.usd_amount for i in mine if i.usd_amount is not None), Decimal("0"))
         return {
             "backend": info.backend,
             "network": info.network,
@@ -247,7 +253,9 @@ def register_payment_routes(
             "faucet_url": state.settings.zcash_faucet_url if state.settings.zcash_network == "testnet" else None,
             "your_address": user.zcash_address,
             "receiving_account_connected": account is not None,
-            "confirmed_received_via_zerveil": str(received),  # what the scanner confirmed in your wallet (not a wallet balance)
+            "confirmed_received_via_zerveil": str(received),  # asset amount the scanner confirmed in your wallet (not a wallet balance)
+            "confirmed_received_usd": str(received_usd),  # the USD value of those invoices (USD-priced ones only)
+            "asset": state.settings.ticker,
             "custody": "none: Zerveil never holds funds",
         }
 
@@ -304,8 +312,8 @@ def register_payment_routes(
 
     def payment_required(invoice: Invoice) -> JSONResponse:
         req = payments().payment_request(invoice)
-        keys = ("id", "network", "ticker", "amount", "address", "memo", "zip321_uri", "pay_url", "expires_at", "status", "confirmations",
-                "required_confirmations", "simulated", "direct")  # fmt: skip
+        keys = ("id", "currency", "usd_amount", "asset", "usd_rate", "rate_source", "test_rate", "network", "ticker", "amount", "address",
+                "memo", "zip321_uri", "pay_url", "expires_at", "status", "confirmations", "required_confirmations", "simulated", "direct")  # fmt: skip
         body = {
             "error": "payment_required",
             "detail": "Pay this shielded Zcash invoice (it pays the API seller's own wallet directly), then repeat the request with the header "

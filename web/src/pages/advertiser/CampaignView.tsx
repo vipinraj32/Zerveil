@@ -7,29 +7,51 @@ import { ActivityChart, DevClock } from "../../components/CampaignPanels";
 import { LiveNegotiation } from "../../components/LiveNegotiation";
 import { NegotiationQueue, NegotiationSummary, useNegotiationQueue } from "../../components/NegotiationQueue";
 import { DealDetail } from "../../components/DealDetail";
-import { CopyButton, InvoiceStatusChip, PrivacyNote, ShieldedCheckout, SimulatedChip, TestnetNotice } from "../../components/Payments";
+import { CopyButton, InvoiceStatusChip, PricingNotice, PrivacyNote, ShieldedCheckout, SimulatedChip, TestnetNotice } from "../../components/Payments";
 import { QrCode } from "../../components/QrCode";
 import { Requirements } from "../../components/Requirements";
 import { Timeline } from "../../components/Timeline";
 import { Breadcrumbs } from "../../components/Breadcrumbs";
 import { CreatorLink } from "../../components/CreatorLink";
 import { ActionButton, Avatar, CampaignBadge, Card, Empty, ErrorText, Notice, Spinner, StateBadge, Stat } from "../../components/ui";
-import { MILESTONE_KIND, MODEL_LABEL, OPEN_INVOICE, campaignName, humanize, zec } from "../../format";
+import {
+  LEGACY_ASSET,
+  LEGACY_PRICING_NOTE,
+  MILESTONE_KIND,
+  MODEL_LABEL,
+  OPEN_INVOICE,
+  campaignName,
+  formatAsset,
+  formatUsd,
+  humanize,
+  isUsd,
+  money,
+  requestValue,
+  sumAsset,
+  sumUsd,
+  termsCurrency,
+} from "../../format";
 import { useLiveEvents, useResource } from "../../live";
 import { useMe, useSession } from "../../session";
 import type { CampaignDetail, CampaignPayments, CompensationModel, Deal, DirectoryEntry, NegotiationSession, OwnerInvoice } from "../../types";
 import "./campaign.css";
 import "./dashboard.css";
 
-/** What the scanner confirmed in creators' wallets for one deal (confirmed milestones; legacy history for archived deals). */
-const paidFor = (d: Deal) =>
-  (d.milestones ?? []).filter((m) => m.status === "confirmed").reduce((t, m) => t + Number(m.amount), 0) +
-  d.payouts.filter((p) => p.kind !== "refund").reduce((t, p) => t + Number(p.amount), 0);
+/** What the scanner confirmed in creators' wallets for one deal, in the deal's currency (USD; legacy deals: test
+ * units, including payments of an earlier payment flow on archived deals). USD is summed in integer cents. */
+function paidFor(d: Deal): string {
+  const currency = termsCurrency(d.terms);
+  const confirmed = (d.milestones ?? []).filter((m) => m.status === "confirmed").map((m) => m.amount);
+  const legacy = d.payouts.filter((p) => p.kind !== "refund").map((p) => p.amount);
+  if (isUsd(currency) && legacy.length === 0) return money(sumUsd(confirmed), currency, true);
+  return money(sumAsset([...confirmed, ...legacy]), isUsd(currency) ? LEGACY_ASSET : currency, true);
+}
 
 /** Accept the agreed deals together: the backend then requests each creator's fixed fee as its own direct payment. */
 function ApprovalPanel({ campaign, deals, names, onDone }: { campaign: CampaignDetail; deals: Deal[]; names: Map<string, string>; onDone: () => void }) {
   const { status } = useSession();
   const pending = campaign.pending_approval!;
+  const cur = campaign.spec.currency;
   const rows = pending.deals.map((id) => deals.find((d) => d.id === id)).filter((d): d is Deal => !!d);
 
   async function decide(approved: boolean) {
@@ -41,19 +63,19 @@ function ApprovalPanel({ campaign, deals, names, onDone }: { campaign: CampaignD
     <div className="signing card tone-warn">
       <div className="signing-head">
         <h2>
-          Accept {pending.deals.length} deal{pending.deals.length > 1 ? "s" : ""} · {zec(pending.upfront)} upfront
+          Accept {pending.deals.length} deal{pending.deals.length > 1 ? "s" : ""} · {money(pending.upfront, cur, true)} upfront
         </h2>
         {status?.payments_simulated && (
-          <span className="chip warn" title="Simulated payment mode: no ZEC moves">
-            Simulated — no ZEC moved
+          <span className="chip warn" title="Simulated payment mode: nothing moves on-chain">
+            Simulated — no real payments
           </span>
         )}
       </div>
 
       <div className="stats compact-stats">
-        <Stat label="Upfront (fixed fees)" value={zec(pending.upfront)} hint="Requested right after you accept: one direct payment to each creator's wallet" />
-        <Stat label="Most these deals can pay" value={zec(pending.total)} hint="Sum of the deal caps: fixed fee plus the most the performance fee can add" />
-        <Stat label="Budget remaining" value={zec(campaign.payments.remaining)} hint="The budget is a spending limit, not money held" />
+        <Stat label="Upfront (fixed fees)" value={money(pending.upfront, cur)} hint="Requested right after you accept: one direct payment to each creator's wallet" />
+        <Stat label="Most these deals can pay" value={money(pending.total, cur)} hint="Sum of the deal caps: fixed fee plus the most the performance fee can add" />
+        <Stat label="Budget remaining" value={money(campaign.payments.remaining, campaign.payments.currency ?? cur)} hint="The budget is a spending limit, not money held" />
       </div>
 
       {rows.length > 0 && (
@@ -62,7 +84,7 @@ function ApprovalPanel({ campaign, deals, names, onDone }: { campaign: CampaignD
             <tr>
               <th>Creator</th>
               <th>Fixed</th>
-              <th>CPM</th>
+              <th>CPM (per 1K views)</th>
               <th>Cap</th>
             </tr>
           </thead>
@@ -72,10 +94,10 @@ function ApprovalPanel({ campaign, deals, names, onDone }: { campaign: CampaignD
                 <td>
                   <CreatorLink id={d.influencer_id}>{names.get(d.influencer_id) ?? d.influencer_id}</CreatorLink>
                 </td>
-                <td>{zec(d.terms?.fixed_fee)}</td>
-                <td>{zec(d.terms?.cpm)}</td>
+                <td>{money(d.terms?.fixed_fee, termsCurrency(d.terms), true)}</td>
+                <td>{money(d.terms?.cpm, termsCurrency(d.terms), true)}</td>
                 <td>
-                  <strong>{zec(d.terms?.cap)}</strong>
+                  <strong>{money(d.terms?.cap, termsCurrency(d.terms), true)}</strong>
                 </td>
               </tr>
             ))}
@@ -93,10 +115,11 @@ function ApprovalPanel({ campaign, deals, names, onDone }: { campaign: CampaignD
       <details className="signing-more">
         <summary>What happens when I accept?</summary>
         <p className="small">
-          Each creator's fixed fee becomes its own shielded payment request to a fresh address of that creator's own wallet. You pay from your own Zcash
+          Amounts are in USD. Each creator's fixed fee becomes its own shielded payment request to a fresh address of that creator's own wallet. You pay from your own Zcash
           wallet, one by one or all at once with a multi-recipient ZIP-321 request. A payment counts only after Zerveil's view-only scanner sees it in the
           creator's wallet with {status?.zcash.confirmations_required ?? 1}+ confirmations. The performance fee is computed from verified views at day 7
-          and requested the same way.
+          and requested the same way. Your wallet pays the equivalent in shielded testnet Zcash, converted once per request at a test rate (no real value; no
+          stablecoin is involved).
         </p>
         <p className="small muted">Zerveil never holds your money: it only requests payments and confirms they arrived.</p>
       </details>
@@ -153,12 +176,22 @@ function CampaignPaymentsSection({
       <p className="muted small">
         Each request pays one creator's own wallet directly. Creator addresses here are one-time addresses for this payment only.
       </p>
+      <PricingNotice />
       {data.pay_all_uri && open.length > 1 && (
         <div className="pay-all">
           <div className="stack">
             <h3>
-              Pay all {open.length} open requests · {zec(data.open_total)}
+              Pay all {open.length} open requests · {formatUsd(data.open_total_usd)}
             </h3>
+            <div className="test-payment" role="note">
+              <div className="test-payment-label">Test-only payment (Zcash testnet)</div>
+              <p className="test-payment-line">
+                Your wallet sends {data.open_asset ? formatAsset(data.open_total, data.open_asset) : `${formatAsset(data.open_total, "")}(mixed assets)`} in total ·
+                network {open[0]?.network || "zcash-testnet"}
+                {open[0]?.usd_rate && data.open_asset ? ` · converted at a test rate (${formatUsd(open[0].usd_rate)} per ${data.open_asset}), not a market price` : " · converted at a test rate, not a market price"}{" "}
+                · no stablecoin
+              </p>
+            </div>
             <p className="small">
               One ZIP-321 multi-recipient request: wallets that support it pay every creator in a single transaction. Each creator still receives their
               own payment directly.
@@ -200,7 +233,7 @@ function CampaignPaymentsSection({
                     <tr key={inv.id}>
                       <td>{creatorOf(inv)}</td>
                       <td>{MILESTONE_KIND[kindOf(inv) ?? ""] ?? "—"}</td>
-                      <td>{zec(inv.amount)}</td>
+                      <td>{requestValue(inv, true)}</td>
                       <td>
                         <InvoiceStatusChip status={inv.status} /> <SimulatedChip simulated={inv.simulated} />
                       </td>
@@ -328,6 +361,8 @@ export function CampaignView() {
   const sessions = queue.sessions;
   const started = sessions.filter((s) => s.started_at);
   const model = c.spec.compensation_model as CompensationModel;
+  const cur = c.spec.currency;
+  const pcur = c.payments.currency ?? cur;
   // The conversation on screen: the one the advertiser picked, else whichever creator the backend is talking to now
   const focusId = pinned ?? queue.progress?.current_negotiation_id ?? started.at(-1)?.negotiation_id ?? null;
   const focusSession = sessions.find((s) => s.negotiation_id === focusId) ?? null;
@@ -365,15 +400,20 @@ export function CampaignView() {
             <li>{MODEL_LABEL[c.spec.compensation_model] ?? c.spec.compensation_model}</li>
             <li>Up to {c.spec.max_creators} creators</li>
             <li>
-              Max {zec(c.spec.max_fixed)} fixed + {zec(c.spec.max_cpm)} CPM
+              Max {money(c.spec.max_fixed, cur, true)} fixed + {money(c.spec.max_cpm, cur, true)} CPM
             </li>
-            <li>Cap {zec(c.spec.cap_per_creator)} each</li>
+            <li>Cap {money(c.spec.cap_per_creator, cur, true)} each</li>
             <li>{c.spec.max_rounds} rounds</li>
           </ul>
         </div>
         <DevClock />
       </header>
 
+      {!isUsd(cur) && (
+        <Notice tone="warn">
+          <strong>{LEGACY_PRICING_NOTE}.</strong> This campaign's amounts are legacy test units, not dollars.
+        </Notice>
+      )}
       {c.error && <Notice tone="bad">{c.error}</Notice>}
       {c.pending_approval && <ApprovalPanel campaign={c} deals={list} names={names} onDone={reloadAll} />}
       {!c.pending_approval && payments.data && <CampaignPaymentsSection data={payments.data} deals={list} name={creatorName} onChange={reloadAll} />}
@@ -401,25 +441,25 @@ export function CampaignView() {
       <div className="report-grid">
         <div className="report-main">
           <section className="report-kpis" aria-label="Money">
-            <Stat label="Budget" value={zec(c.payments.budget)} hint="A spending limit, not money held" />
-            <Stat label="Reserved" value={zec(c.payments.reserved)} hint="Caps of deals that may still be paid or were paid" />
-            <Stat label="Requested" value={zec(c.payments.requested)} hint="Payment requests open right now" />
-            <Stat label="Paid to creators" value={zec(c.payments.paid)} hint="Confirmed by the scanner in creators' wallets" />
-            <Stat label="Remaining" value={zec(c.payments.remaining)} />
+            <Stat label="Budget" value={money(c.payments.budget, pcur)} hint="A spending limit, not money held" />
+            <Stat label="Reserved" value={money(c.payments.reserved, pcur)} hint="Caps of deals that may still be paid or were paid" />
+            <Stat label="Requested" value={money(c.payments.requested, pcur)} hint="Payment requests open right now" />
+            <Stat label="Paid to creators" value={money(c.payments.paid, pcur)} hint="Confirmed by the scanner in creators' wallets" />
+            <Stat label="Remaining" value={money(c.payments.remaining, pcur)} />
           </section>
           <p className="muted small payments-where">
             {status?.payments_simulated ? (
               <>
-                <span className="chip warn">Simulated — no ZEC moved</span> payment requests are settled with the dev simulate button.
+                <span className="chip warn">Simulated — no real payments</span> payment requests are settled with the dev simulate button.
               </>
             ) : status ? (
               <>
-                <span className="chip good">Zcash {status.zcash.network}</span> you pay each creator directly from your own wallet; Zerveil holds no funds.
+                <span className="chip good">Zcash {status.zcash.network}</span> prices in USD; you pay each creator directly from your own wallet. Zerveil holds no funds.
               </>
             ) : null}
           </p>
 
-          <section className="report-card">{events.data ? <ActivityChart events={events.data} deals={list} /> : <Spinner />}</section>
+          <section className="report-card">{events.data ? <ActivityChart events={events.data} deals={list} currency={pcur} /> : <Spinner />}</section>
 
           <section className="report-card">
             <div className="report-toolbar">
@@ -456,11 +496,11 @@ export function CampaignView() {
                         <td>
                           <StateBadge state={d.state} />
                         </td>
-                        <td className="num">{zec(d.terms?.fixed_fee)}</td>
-                        <td className="num">{zec(d.terms?.cpm)}</td>
-                        <td className="num">{zec(d.terms?.cap)}</td>
+                        <td className="num">{money(d.terms?.fixed_fee, termsCurrency(d.terms), true)}</td>
+                        <td className="num">{money(d.terms?.cpm, termsCurrency(d.terms), true)}</td>
+                        <td className="num">{money(d.terms?.cap, termsCurrency(d.terms), true)}</td>
                         <td className="num">{d.rounds.length}</td>
-                        <td className="num">{zec(paidFor(d))}</td>
+                        <td className="num">{paidFor(d)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -536,6 +576,7 @@ export function CampaignView() {
                     avatar={avatars.get(deal.influencer_id)}
                     brand={c.spec.advertiser}
                     limits={{ budget: c.spec.budget, max_fixed: c.spec.max_fixed, max_cpm: c.spec.max_cpm, cap: c.spec.cap_per_creator }}
+                    currency={cur}
                     deliverable={c.spec.deliverable}
                   />
                 )
@@ -548,6 +589,7 @@ export function CampaignView() {
                       name={creatorName}
                       avatar={(i) => avatars.get(i)}
                       model={model}
+                      currency={cur}
                       focus={focusId}
                       following={pinned === null}
                       all={allChats}
@@ -562,7 +604,7 @@ export function CampaignView() {
                     />
                   ) : null}
                   {queue.error && <p className="error small">{queue.error}</p>}
-                  {queue.progress && <NegotiationSummary progress={queue.progress} sessions={sessions} name={creatorName} model={model} />}
+                  {queue.progress && <NegotiationSummary progress={queue.progress} sessions={sessions} name={creatorName} model={model} currency={cur} />}
                   {allChats ? (
                     <div className="ln-stack">
                       {started.map((s) => {
@@ -577,6 +619,7 @@ export function CampaignView() {
                             creator={creatorName(s.creator_id)}
                             avatar={avatars.get(s.creator_id)}
                             brand={c.spec.advertiser}
+                            currency={cur}
                             onOpen={() => {
                               setPinned(s.negotiation_id);
                               setSelected(s.negotiation_id);
@@ -596,6 +639,7 @@ export function CampaignView() {
                       avatar={avatars.get(focusSession.creator_id)}
                       brand={c.spec.advertiser}
                       limits={{ budget: c.spec.budget, max_fixed: c.spec.max_fixed, max_cpm: c.spec.max_cpm, cap: c.spec.cap_per_creator }}
+                      currency={cur}
                       deliverable={c.spec.deliverable}
                     />
                   ) : (

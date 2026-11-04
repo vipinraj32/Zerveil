@@ -56,6 +56,7 @@ from ..models import (
     clean_campaign_name,
     new_id,
 )
+from ..money import TEST_RATE_NOTICE, format_usd
 from ..payments.service import PaymentError
 from ..services.context import AppContext, build_context, chat_model
 from ..services.deals import ADVERTISER_PRIVATE_EVENTS, POLICY_KIND, DealError, DealService
@@ -182,12 +183,12 @@ class BriefDraft(BaseModel):
     advertiser: str = Field(description="brand or company name")
     brand_handle: str = Field(description="the brand's handle starting with @, e.g. @acme")
     niche: str = Field(description="creator niche, one or two words, e.g. fitness")
-    budget: float = Field(description="total campaign budget in ZEC")
+    budget: float = Field(description="total campaign budget in USD")
     max_creators: int
     compensation_model: Literal["fixed", "cpm", "hybrid"]
-    max_fixed: float = Field(description="highest fixed fee per creator in ZEC; 0 for a pure CPM campaign")
-    max_cpm: float = Field(description="highest ZEC paid per 1,000 views; 0 for a fixed-fee campaign")
-    cap_per_creator: float = Field(description="most one creator can earn in ZEC, at least max_fixed")
+    max_fixed: float = Field(description="highest fixed fee per creator in USD; 0 for a pure CPM campaign")
+    max_cpm: float = Field(description="highest USD paid per 1,000 views; 0 for a fixed-fee campaign")
+    cap_per_creator: float = Field(description="most one creator can earn in USD, at least max_fixed")
     deliverable: Literal["youtube_short", "youtube_video"]
     publish_within_days: int
     requirements: str = Field(description="what the video must show or say, in the brief's words")
@@ -619,9 +620,20 @@ def create_app(
                 "confirmations_required": settings.zcash_confirmation_threshold,
                 "explorer_tx_url": settings.zcash_explorer_tx_url,
                 "faucet_url": settings.zcash_faucet_url if settings.zcash_network == "testnet" else None,
-                "testnet_notice": "Zcash Testnet — TAZ — No real monetary value" if settings.zcash_network == "testnet" else None,
+                "testnet_notice": "Zcash Testnet — test payments only — No real monetary value" if settings.zcash_network == "testnet" else None,
             },
-            "premium_search_price": str(settings.premium_search_price),
+            # Business currency vs what is paid. There is no USD stablecoin on Zcash: payments are shielded ZEC (TAZ on
+            # testnet) converted from USD per invoice. On testnet the rate is a configured test rate, not a market price.
+            "currency": {
+                "business_currency": "USD",
+                "payment_asset": settings.ticker,
+                "payment_network": f"zcash-{settings.zcash_network}",
+                "stablecoin": None,
+                "usd_per_unit": str(settings.zcash_test_usd_rate) if settings.zcash_network != "mainnet" else None,
+                "test_rate": settings.zcash_network != "mainnet",
+                "rate_notice": TEST_RATE_NOTICE if settings.zcash_network != "mainnet" else "mainnet pricing is not supported in this build",
+            },
+            "premium_search_price": str(settings.premium_search_price),  # USD
             "verifier_online": ctx.videos is not None,
             "login_configured": oauth.configured,
             "llm": settings.llm_model if ctx.llm else None,
@@ -648,7 +660,10 @@ def create_app(
     async def create_campaign(body: CampaignCreate, user: AdvertiserUser, request: Request) -> dict[str, Any]:
         limits = await state.deals.payments.spending_policy(user.id)
         if limits.enabled and body.budget > limits.max_campaign_budget:
-            raise HTTPException(400, f"budget {body.budget} is above your agent's campaign limit {limits.max_campaign_budget} (Settings → Spending limits)")
+            raise HTTPException(
+                400,
+                f"budget {format_usd(body.budget)} is above your agent's campaign limit {format_usd(limits.max_campaign_budget)} (Settings → Spending limits)",
+            )
         # Disclosure gate: every jurisdiction needs a policy and a required tag that policy approves
         policies = {j: state.ctx.disclosure.latest(j) for j in body.jurisdictions}
         problems = campaign_problems(policies, body.required_tags)
@@ -705,7 +720,7 @@ def create_app(
             raise HTTPException(400, "Set ANTHROPIC_API_KEY to parse briefs; fill the form manually otherwise")
         try:
             draft = await state.ctx.llm.with_structured_output(BriefDraft, method="json_schema").ainvoke(
-                f"Turn this advertiser brief into campaign parameters. Use ZEC amounts with 2 decimals. Brief:\n{body.brief}"
+                f"Turn this advertiser brief into campaign parameters. Use USD amounts with 2 decimals. Brief:\n{body.brief}"
             )
         except Exception as e:  # provider/network errors: the form can still be filled by hand
             log.warning("brief parsing failed: %s", e)
@@ -1058,6 +1073,8 @@ def create_app(
                 continue
             paid = sum((m.amount for m in d.milestones if m.status == "confirmed"), Decimal(0))
             terms = d.terms.model_dump(mode="json", include={"compensation_model", "fixed_fee", "cpm", "cap", "publish_by"}) if d.terms else None
+            if terms is not None:
+                terms["currency"] = d.terms.currency or "TAZ"  # type: ignore[union-attr]  # None: priced in TAZ before USD pricing
             out.append({
                 "deal_id": d.id,
                 "campaign_id": c.spec.id,

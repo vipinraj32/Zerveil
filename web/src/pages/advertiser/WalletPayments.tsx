@@ -1,16 +1,20 @@
 // Advertiser payments: network and scanner status, the payment requests I pay (each directly to the recipient's own
 // wallet), the agent's prepaid API credit and spending limits, its pending spend requests, and the HTTP 402
-// premium-search demo. All amounts are shielded Zcash. Zerveil holds no funds.
+// premium-search demo. Amounts are USD; what is paid is shielded Zcash (testnet), converted per request at a test
+// rate. Zerveil holds no funds.
 
 import { useEffect, useState, type FormEvent } from "react";
 import { Link } from "react-router";
 import { api } from "../../api";
-import { InvoiceStatusChip, PrivacyNote, ShieldedCheckout, SimulatedChip, TestnetNotice, WalletStatusPanel } from "../../components/Payments";
-import { ActionButton, Card, Empty, ErrorText, Notice, Spinner, Stat } from "../../components/ui";
-import { PURPOSE_LABEL, humanize, num, ticker, when, zec } from "../../format";
+import { InvoiceStatusChip, PricingNotice, PrivacyNote, ShieldedCheckout, SimulatedChip, TestnetNotice, WalletStatusPanel } from "../../components/Payments";
+import { ActionButton, Card, Empty, ErrorText, Notice, Spinner, Stat, UsdInput } from "../../components/ui";
+import { LEGACY_ASSET, PURPOSE_LABEL, formatAsset, formatUsd, humanize, num, requestValue, toCents, when } from "../../format";
 import { useLiveEvents, useResource } from "../../live";
 import { useSession } from "../../session";
-import type { AgentPremiumSearch, OwnerInvoice, PaymentRequired, PremiumSearchResult, SpendingPolicy } from "../../types";
+import type { AgentPremiumSearch, CreditEntry, OwnerInvoice, PaymentRequired, PremiumSearchResult, SpendingPolicy } from "../../types";
+
+/** A USD amount typed by the user: positive, at most 2 decimals (what the API accepts). */
+const validUsd = (v: string) => /^\d+(\.\d{1,2})?$/.test(v.trim()) && (toCents(v) ?? 0n) > 0n;
 
 function InvoiceHistory({ invoices, onOpen }: { invoices: OwnerInvoice[]; onOpen: (id: string) => void }) {
   if (invoices.length === 0) return <Empty>No payment requests yet.</Empty>;
@@ -38,7 +42,7 @@ function InvoiceHistory({ invoices, onOpen }: { invoices: OwnerInvoice[]; onOpen
                   </Link>
                 )}
               </td>
-              <td>{zec(i.amount)}</td>
+              <td>{requestValue(i, true)}</td>
               <td>
                 <InvoiceStatusChip status={i.status} confirmations={i.confirmations} required={i.required_confirmations} />
                 <SimulatedChip simulated={i.simulated} />
@@ -95,11 +99,11 @@ function InvoiceDetail({ id, onClose, onChange }: { id: string; onClose: () => v
           />
           {i.notes.length > 0 && (
             <>
-              <h3>Received notes</h3>
+              <h3 className="small muted">Received notes (payment details)</h3>
               <table className="table compact">
                 <thead>
                   <tr>
-                    <th>Amount</th>
+                    <th>Amount ({i.asset || i.ticker})</th>
                     <th>Pool</th>
                     <th>Confirmations</th>
                     <th>Mined height</th>
@@ -110,7 +114,7 @@ function InvoiceDetail({ id, onClose, onChange }: { id: string; onClose: () => v
                 <tbody>
                   {i.notes.map((n) => (
                     <tr key={n.key}>
-                      <td>{zec(n.amount)}</td>
+                      <td>{formatAsset(n.amount, i.asset || i.ticker)}</td>
                       <td>{n.pool}</td>
                       <td>{n.confirmations}</td>
                       <td>{n.mined_height ?? "unmined"}</td>
@@ -161,24 +165,26 @@ function CreditCard({ onInvoice }: { onInvoice: (id: string) => void }) {
     <Card title="API credit">
       <p className="muted small">
         Prepaid API calls your advertiser agent may use on paid APIs (like premium creator search) within the limits below. Top-ups are shielded
-        payments made directly to the API seller's own wallet; this is a prepayment for API calls, not a deposit, and it is not withdrawable.
+        payments made directly to the API seller's own wallet; this is a prepayment for API calls, not a deposit, and it is not withdrawable. Credit
+        is kept in dollars.
       </p>
       <ErrorText error={credit.error} />
       {c && (
         <div className="stats">
-          <Stat label="Balance" value={zec(c.balance)} />
-          <Stat label="Spent (24 h)" value={zec(c.spent_24h)} />
+          <Stat label="Balance" value={formatUsd(c.balance)} />
+          <Stat label="Spent (24 h)" value={formatUsd(c.spent_24h)} />
         </div>
       )}
       <div className="row" style={{ marginTop: "0.75rem" }}>
         <label className="grow">
-          Top-up amount ({ticker()})
-          <input type="number" min="0.0001" step="0.0001" value={amount} onChange={(e) => setAmount(e.target.value)} />
+          Top-up amount ($)
+          <UsdInput type="number" min="0.01" max="1000" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} />
+          <small>Dollars and cents, e.g. 25.00.</small>
         </label>
         <ActionButton
-          disabled={!(Number(amount) > 0)}
+          disabled={!validUsd(amount)}
           onClick={async () => {
-            const inv = await api.topUp(amount);
+            const inv = await api.topUp(amount.trim());
             onInvoice(inv.id);
             await credit.reload();
           }}
@@ -194,7 +200,7 @@ function CreditCard({ onInvoice }: { onInvoice: (id: string) => void }) {
             <thead>
               <tr>
                 <th>Category</th>
-                <th>Amount</th>
+                <th>Amount ($)</th>
                 <th>Reason</th>
                 <th />
               </tr>
@@ -203,7 +209,7 @@ function CreditCard({ onInvoice }: { onInvoice: (id: string) => void }) {
               {c.pending_requests.map((r) => (
                 <tr key={r.id}>
                   <td>{humanize(r.category)}</td>
-                  <td>{zec(r.amount)}</td>
+                  <td>{formatUsd(r.amount, true)}</td>
                   <td className="small">{r.reason}</td>
                   <td>
                     <div className="row">
@@ -241,10 +247,11 @@ function CreditCard({ onInvoice }: { onInvoice: (id: string) => void }) {
               {c.entries.map((e) => (
                 <tr key={e.id}>
                   <td className="small">{when(e.at)}</td>
-                  <td>{e.kind === "topup" ? "Top-up" : `Spend · ${humanize(e.category)}`}</td>
                   <td>
-                    {e.kind === "spend" ? "−" : "+"}
-                    {zec(e.amount)} <SimulatedChip simulated={e.simulated} />
+                    {e.kind === "topup" ? "Top-up" : e.kind === "spend" ? `Spend · ${humanize(e.category)}` : "Legacy credit (test units) closed by the move to USD pricing"}
+                  </td>
+                  <td>
+                    {creditAmount(e, legacyBefore(c.entries))} <SimulatedChip simulated={e.simulated} />
                   </td>
                 </tr>
               ))}
@@ -254,6 +261,18 @@ function CreditCard({ onInvoice }: { onInvoice: (id: string) => void }) {
       )}
     </Card>
   );
+}
+
+/** Entries up to the legacy_reset entry were kept in legacy test units before USD pricing ("" when there is none). */
+const legacyBefore = (entries: CreditEntry[]) => entries.find((e) => e.kind === "legacy_reset")?.at ?? "";
+
+/** A signed ledger amount: USD, or legacy test units for the reset entry and anything recorded before it. */
+function creditAmount(e: CreditEntry, legacyUntil: string): string {
+  const legacy = e.kind === "legacy_reset" || (legacyUntil !== "" && e.at <= legacyUntil);
+  const neg = e.amount.trim().startsWith("-");
+  const abs = neg ? e.amount.trim().slice(1) : e.amount;
+  const sign = neg ? "−" : "+";
+  return legacy ? `${sign}${formatAsset(abs, LEGACY_ASSET)} (legacy)` : `${sign}${formatUsd(abs)}`;
 }
 
 function SpendingLimits() {
@@ -279,12 +298,11 @@ function SpendingLimits() {
       setError(err instanceof Error ? err.message : String(err));
     }
   }
-  const t = ticker();
   return (
     <Card title="Agent spending limits">
       <p className="muted small">
-        Hard limits checked by deterministic code before your agent spends anything. The LLM cannot change them. Campaign budgets above the campaign
-        limit are refused.
+        Hard limits in USD, checked by deterministic code before your agent spends anything. The LLM cannot change them. Campaign budgets above the
+        campaign limit are refused.
       </p>
       <form className="form" onSubmit={submit}>
         <label className="check">
@@ -292,20 +310,20 @@ function SpendingLimits() {
         </label>
         <div className="grid-2">
           <label>
-            Max per request ({t})
-            <input value={form.max_per_request} onChange={(e) => set("max_per_request", e.target.value)} inputMode="decimal" />
+            Max per request ($)
+            <UsdInput value={form.max_per_request} onChange={(e) => set("max_per_request", e.target.value)} />
           </label>
           <label>
-            Max per day ({t})
-            <input value={form.max_daily} onChange={(e) => set("max_daily", e.target.value)} inputMode="decimal" />
+            Max per day ($)
+            <UsdInput value={form.max_daily} onChange={(e) => set("max_daily", e.target.value)} />
           </label>
           <label>
-            Max campaign budget ({t})
-            <input value={form.max_campaign_budget} onChange={(e) => set("max_campaign_budget", e.target.value)} inputMode="decimal" />
+            Max campaign budget ($)
+            <UsdInput value={form.max_campaign_budget} onChange={(e) => set("max_campaign_budget", e.target.value)} />
           </label>
           <label>
-            Ask me above ({t})
-            <input value={form.approval_above} onChange={(e) => set("approval_above", e.target.value)} inputMode="decimal" />
+            Ask me above ($)
+            <UsdInput value={form.approval_above} onChange={(e) => set("approval_above", e.target.value)} />
             <small>Spends above this wait for your approval.</small>
           </label>
         </div>
@@ -413,7 +431,7 @@ function PremiumSearchDemo() {
     <Card title="Premium creator search (HTTP 402)">
       <p className="muted small">
         A paid API: <code>GET /api/influencers/premium-search</code> answers <code>402 Payment Required</code> with a shielded invoice for{" "}
-        {zec(status?.premium_search_price)}. Pay it, then repeat the request with the <code>X-Payment-Id</code> header. A transaction id is not accepted
+        {formatUsd(status?.premium_search_price)}. Pay it, then repeat the request with the <code>X-Payment-Id</code> header. A transaction id is not accepted
         as proof; only the scanner seeing the confirmed payment in the API seller's wallet unlocks it, once.
       </p>
       <div className="row">
@@ -489,6 +507,7 @@ export function WalletPayments() {
         </div>
         <TestnetNotice inline />
       </div>
+      <PricingNotice />
 
       <div className="split">
         <Card title="Network and scanner">

@@ -271,10 +271,42 @@ UPDATE invoices SET purpose = 'milestone', data = jsonb_set(data, '{purpose}', '
 UPDATE campaigns SET data = jsonb_set(data, '{status}', '"awaiting_payment"') WHERE data->>'status' = 'funding';
 """
 
+# 004: USD is the business currency. Amounts recorded before this were TAZ test units with no USD value, so they are
+#   never relabeled as dollars. Nothing is deleted:
+#   - existing campaigns are stamped spec.currency = "TAZ" and, unless already finished, closed (status failed, with a
+#     reason; the negotiation queue stops), so no TAZ budget keeps running as if it were USD;
+#   - their deals that could still move are archived with a reason and their budget reservations released;
+#   - unpaid invoices priced in TAZ (awaiting payment / underpaid) are cancelled; ones already seen keep confirming;
+#   - prepaid API credit held in TAZ is closed with one `legacy_reset` ledger entry per user (credit is USD now).
+USD_PRICING = """
+UPDATE campaigns SET data = jsonb_set(data, '{spec,currency}', '"TAZ"') WHERE data->'spec'->>'currency' IS NULL;
+UPDATE campaigns
+   SET data = data || jsonb_build_object('status', 'failed', 'negotiation_cancelled', true,
+                                         'error', 'Closed when Zerveil moved to USD pricing: this campaign''s amounts were TAZ test units, not USD.')
+ WHERE data->'spec'->>'currency' = 'TAZ' AND data->>'status' NOT IN ('done', 'failed');
+UPDATE deals
+   SET state = 'ARCHIVED',
+       data = jsonb_set(data, '{state}', '"ARCHIVED"')
+              || jsonb_build_object('archived_reason', 'closed by the move to USD pricing (was ' || state || '); amounts were TAZ test units')
+ WHERE state NOT IN ('REJECTED', 'ARCHIVED', 'COMPLETED', 'UNDELIVERED', 'BLOCKED', 'PAYMENT_EXPIRED')
+   AND campaign_id IN (SELECT id FROM campaigns WHERE data->'spec'->>'currency' = 'TAZ');
+DELETE FROM budget_reservations WHERE deal_id IN (SELECT id FROM deals WHERE state = 'ARCHIVED');
+UPDATE invoices SET status = 'cancelled', data = jsonb_set(data, '{status}', '"cancelled"')
+ WHERE data->>'usd_amount' IS NULL AND status IN ('awaiting_payment', 'underpaid');
+INSERT INTO agent_credit_ledger (id, user_id, amount, kind, ref, at, data)
+SELECT 'CR-usd-' || user_id, user_id, -SUM(amount), 'legacy_reset', 'usd-pricing:' || user_id, now(),
+       jsonb_build_object('id', 'CR-usd-' || user_id, 'user_id', user_id, 'amount', (-SUM(amount))::text, 'kind', 'legacy_reset',
+                          'ref', 'usd-pricing:' || user_id, 'category', 'TAZ credit closed by the move to USD pricing',
+                          'simulated', false, 'at', to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+  FROM agent_credit_ledger GROUP BY user_id HAVING SUM(amount) <> 0
+ON CONFLICT DO NOTHING;
+"""
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "baseline", BASELINE),
     Migration(2, "zcash_payments", ZCASH_PAYMENTS),
     Migration(3, "direct_payments", DIRECT_PAYMENTS),
+    Migration(4, "usd_pricing", USD_PRICING),
 ]
 
 LEDGER = """

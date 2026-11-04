@@ -103,12 +103,12 @@ def build_mcp(api_base: str, http: httpx.AsyncClient | None = None, streamable_h
 
     @mcp.tool()
     async def campaign_spend(campaign_id: str, ctx: Context) -> dict[str, str]:
-        """ZEC requested from the advertiser and confirmed paid directly to creators' wallets for a campaign. Zerveil holds nothing."""
+        """USD requested from the advertiser and confirmed paid directly to creators' wallets for a campaign. Zerveil holds nothing."""
         deals = await get(f"/api/campaigns/{campaign_id}/deals", ctx)
         milestones = [m for d in deals for m in d.get("milestones", [])]
         confirmed = sum((Decimal(m["amount"]) for m in milestones if m["status"] == "confirmed"), Decimal(0))
         open_ = sum((Decimal(m["amount"]) for m in milestones if m["status"] in ("requested", "pending")), Decimal(0))
-        return {"confirmed_paid_to_creators": str(confirmed), "requested_not_confirmed": str(open_), "held_by_zerveil": "0"}
+        return {"currency": "USD", "confirmed_paid_to_creators": str(confirmed), "requested_not_confirmed": str(open_), "held_by_zerveil": "0"}
 
     @mcp.tool()
     async def get_video_stats(video: str, ctx: Context) -> dict[str, Any]:

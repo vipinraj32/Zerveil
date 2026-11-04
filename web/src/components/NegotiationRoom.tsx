@@ -1,5 +1,5 @@
 import { api } from "../api";
-import { MODEL_LABEL, humanize, num, termsText, zec, when } from "../format";
+import { LEGACY_AMOUNT_RE, MODEL_LABEL, humanize, money, num, termsCurrency, termsText, when } from "../format";
 import { useLiveEvents, useResource } from "../live";
 import type { Deal } from "../types";
 import { Empty } from "./ui";
@@ -11,7 +11,8 @@ function plainOutcome(outcome: string): string {
 }
 
 // The creator agent's note only when it says more than the terms already shown
-const restatesTerms = (text: string) => /^(counter-offer|offer|accepted)[.:]/i.test(text.trim()) && /\d (TAZ|ZEC)\b/.test(text);
+// (USD terms read "$19.00 fixed …"; legacy transcripts in test units)
+const restatesTerms = (text: string) => /^(counter-offer|offer|accepted)[.:]/i.test(text.trim()) && (/\$\d/.test(text) || LEGACY_AMOUNT_RE.test(text));
 
 /** Structured offers, what moved each round, the payable breakdown and this party's own decision records. */
 export function NegotiationRoom({ deal }: { deal: Deal }) {
@@ -27,6 +28,7 @@ export function NegotiationRoom({ deal }: { deal: Deal }) {
   const v = view.data;
   if (!v) return <Empty>Loading negotiation…</Empty>;
   const model = v.compensation_model;
+  const cur = termsCurrency(deal.terms); // no terms yet: a live negotiation, priced in USD
   const s = v.scope;
 
   return (
@@ -61,10 +63,10 @@ export function NegotiationRoom({ deal }: { deal: Deal }) {
             {v.rounds.map((r) => (
               <tr key={r.round}>
                 <td>{r.round}</td>
-                <td>{r.advertiser_offer && termsText(r.advertiser_offer, model)}</td>
+                <td>{r.advertiser_offer && termsText(r.advertiser_offer, model, cur)}</td>
                 <td>
                   <strong className={`reply-${r.reply}`}>{humanize(r.reply)}</strong>
-                  {r.counter && <> · {termsText(r.counter, model)}</>}
+                  {r.counter && <> · {termsText(r.counter, model, cur)}</>}
                   {r.explanation && !restatesTerms(r.explanation) && !r.counter && <div className="small muted">{plainOutcome(r.explanation)}</div>}
                 </td>
               </tr>
@@ -89,11 +91,11 @@ export function NegotiationRoom({ deal }: { deal: Deal }) {
               {v.payable.examples.map((e) => (
                 <tr key={e.eligible_views}>
                   <td>{num(e.eligible_views)}</td>
-                  <td>{zec(e.fixed)}</td>
-                  <td>{zec(e.performance)}</td>
+                  <td>{money(e.fixed, cur, true)}</td>
+                  <td>{money(e.performance, cur, true)}</td>
                   <td>
-                    {zec(e.total)}
-                    {e.capped && <span className="chip">capped (uncapped {zec(e.uncapped_total)})</span>}
+                    {money(e.total, cur, true)}
+                    {e.capped && <span className="chip">capped (uncapped {money(e.uncapped_total, cur, true)})</span>}
                   </td>
                 </tr>
               ))}

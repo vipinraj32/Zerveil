@@ -1,6 +1,7 @@
 // How a creator reads their deals: the backend's DealState grouped into the stages they act on. Every state belongs to
 // exactly one group, so the filter counts add up to the total. Nothing here decides anything; it only labels states.
 
+import { sumUsd, termsCurrency } from "./format";
 import type { Deal, DealState, InfluencerDeal, Offer } from "./types";
 
 export type DealGroup = "pending" | "negotiating" | "accepted" | "active" | "completed" | "rejected";
@@ -46,19 +47,23 @@ export function latestOffer(d: InfluencerDeal): Offer | null {
 }
 
 /** What this deal pays: the signed terms once agreed, otherwise the latest proposal. */
-export function dealPay(d: InfluencerDeal): { fixed_fee: string; cpm: string; cap: string; model: string; final: boolean } | null {
-  if (d.terms) return { fixed_fee: d.terms.fixed_fee, cpm: d.terms.cpm, cap: d.terms.cap, model: d.terms.compensation_model, final: true };
+export function dealPay(d: InfluencerDeal): { fixed_fee: string; cpm: string; cap: string; model: string; final: boolean; currency: string } | null {
+  const currency = dealCurrency(d);
+  if (d.terms) return { fixed_fee: d.terms.fixed_fee, cpm: d.terms.cpm, cap: d.terms.cap, model: d.terms.compensation_model, final: true, currency };
   const o = latestOffer(d);
-  return o ? { fixed_fee: o.fixed_fee, cpm: o.cpm, cap: o.cap, model: o.compensation_model, final: false } : null;
+  return o ? { fixed_fee: o.fixed_fee, cpm: o.cpm, cap: o.cap, model: o.compensation_model, final: false, currency } : null;
 }
 
-/** What the scanner confirmed in the creator's wallet for this deal (confirmed milestones), plus legacy history of archived deals. */
-export const receivedFor = (d: Deal) =>
-  d.milestones.filter((m) => m.status === "confirmed").reduce((s, m) => s + Number(m.amount), 0) +
-  d.payouts.filter((p) => p.kind !== "refund").reduce((s, p) => s + Number(p.amount), 0);
+/** The currency of a deal's amounts: "USD", or the legacy unit for terms signed before USD pricing. */
+export const dealCurrency = (d: Deal) => termsCurrency(d.terms);
 
-/** Milestones requested from the advertiser and not yet confirmed. */
-export const awaitingFor = (d: Deal) => d.milestones.filter((m) => m.status === "requested" || m.status === "pending").reduce((s, m) => s + Number(m.amount), 0);
+/** What the scanner confirmed in the creator's wallet for this deal (confirmed milestones), plus legacy history of archived
+ * deals. In the deal's currency (see dealCurrency), summed in integer cents; a 2-decimal string. */
+export const receivedFor = (d: Deal) =>
+  sumUsd([...d.milestones.filter((m) => m.status === "confirmed").map((m) => m.amount), ...d.payouts.filter((p) => p.kind !== "refund").map((p) => p.amount)]);
+
+/** Milestones requested from the advertiser and not yet confirmed (deal currency, 2-decimal string). */
+export const awaitingFor = (d: Deal) => sumUsd(d.milestones.filter((m) => m.status === "requested" || m.status === "pending").map((m) => m.amount));
 
 /** Search text: only what the creator is shown (brand, handle, niche, brief, format). */
 export const dealSearchText = (d: InfluencerDeal) =>

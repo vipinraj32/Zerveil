@@ -2,8 +2,8 @@ import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "r
 import { Link, useNavigate } from "react-router";
 import { api } from "../../api";
 import { ContentChecksEditor } from "../../components/ContentChecks";
-import { Card, ErrorText, Notice } from "../../components/ui";
-import { MODEL_LABEL, zec } from "../../format";
+import { Card, ErrorText, Notice, UsdInput } from "../../components/ui";
+import { MODEL_LABEL, PRICING_LINE, centsToString, formatUsd, toCents } from "../../format";
 import { useMe, useSession } from "../../session";
 import type { CampaignInput, CompensationModel, ContentScope, Deliverable, DisclosurePolicy } from "../../types";
 
@@ -120,7 +120,11 @@ export function NewCampaign() {
     : ["Choose at least one jurisdiction"];
   const model = form.compensation_model;
   const lengthInvalid = form.max_duration_seconds > 0 && form.min_duration_seconds > form.max_duration_seconds;
-  const money = (v: string) => (v === "" ? "" : Number(v).toFixed(2));
+  // USD amounts go to the API as 2-decimal strings, rounded in integer cents (never through a float)
+  const money = (v: string) => {
+    const c = toCents(v);
+    return v === "" || c === null ? v : centsToString(c);
+  };
   // the server refuses a name the advertiser already used; say so while they type
   const tidyName = (v: string) => v.split(/\s+/).filter(Boolean).join(" ").toLowerCase();
   const nameTaken = form.name.trim() !== "" && existingNames.has(tidyName(form.name));
@@ -203,15 +207,15 @@ export function NewCampaign() {
     }
   }
 
-  const maxSpend = Number(form.cap_per_creator || 0) * form.max_creators;
+  const maxSpend = centsToString((toCents(form.cap_per_creator) ?? 0n) * BigInt(Math.max(0, Math.trunc(form.max_creators || 0)))); // USD, integer cents
   const lengthCap = form.deliverable === "youtube_short" ? SHORTS_MAX_SECONDS : MAX_VIDEO_SECONDS;
 
   return (
     <div className="stack narrow">
       <h1>New campaign</h1>
       <p className="muted small">
-        The budget must stay within your agent's <Link to="/advertiser/payments">spending limits</Link> (max campaign budget). The budget is a spending limit, not a deposit: once you
-        accept the agreed deals, you pay each creator directly from your own Zcash wallet.
+        The budget must stay within your agent's <Link to="/advertiser/payments">spending limits</Link> (max campaign budget). All amounts are in USD. The budget is a spending limit, not a
+        deposit: once you accept the agreed deals, you pay each creator directly from your own Zcash wallet, in shielded testnet Zcash converted at a test rate.
       </p>
       <Card title="Campaign">
         <label className="form">
@@ -234,7 +238,7 @@ export function NewCampaign() {
             value={form.brief}
             onChange={(e) => set("brief", e.target.value)}
             maxLength={2000}
-            placeholder="e.g. 3 fitness creators, 30s Short with #ad, about 120 TAZ"
+            placeholder="e.g. 3 fitness creators, 30s Short with #ad, about $120"
           />
         </label>
         <div className="row">
@@ -429,31 +433,34 @@ export function NewCampaign() {
         <Card title="Budget">
           <div className="grid-3 form">
             <label>
-              Total budget (TAZ)
-              <input type="number" min="0.01" step="0.01" value={form.budget} onChange={(e) => set("budget", e.target.value)} required />
+              Budget ($)
+              <UsdInput type="number" min="0.01" step="0.01" value={form.budget} onChange={(e) => set("budget", e.target.value)} required />
             </label>
             <label>
               Max creators
               <input type="number" min={1} max={10} value={form.max_creators} onChange={(e) => set("max_creators", Number(e.target.value))} />
             </label>
             <label>
-              Max per creator (TAZ)
-              <input type="number" min="0.01" step="0.01" value={form.cap_per_creator} onChange={(e) => set("cap_per_creator", e.target.value)} required />
+              Cap per creator ($)
+              <UsdInput type="number" min="0.01" step="0.01" value={form.cap_per_creator} onChange={(e) => set("cap_per_creator", e.target.value)} required />
             </label>
             {model !== "cpm" && (
               <label>
-                Max fixed fee (TAZ)
-                <input type="number" min="0.01" step="0.01" value={form.max_fixed} onChange={(e) => set("max_fixed", e.target.value)} required />
+                Max fixed fee ($)
+                <UsdInput type="number" min="0.01" step="0.01" value={form.max_fixed} onChange={(e) => set("max_fixed", e.target.value)} required />
               </label>
             )}
             {model !== "fixed" && (
               <label>
-                Max per 1,000 views (TAZ)
-                <input type="number" min="0.01" step="0.01" value={form.max_cpm} onChange={(e) => set("max_cpm", e.target.value)} required />
+                Max $ per 1,000 views
+                <UsdInput type="number" min="0.01" step="0.01" value={form.max_cpm} onChange={(e) => set("max_cpm", e.target.value)} required suffix="/ 1K views" />
               </label>
             )}
           </div>
-          <p className="small muted">At most {zec(maxSpend)} across all creators. You accept each deal, then pay each creator directly; nothing is paid in advance.</p>
+          <p className="small muted">
+            At most {formatUsd(maxSpend)} across all creators. You accept each deal, then pay each creator directly; nothing is paid in advance.
+          </p>
+          <p className="small muted">{PRICING_LINE()}.</p>
         </Card>
 
         <div className="row">

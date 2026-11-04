@@ -220,10 +220,13 @@ async def test_full_campaign_lifecycle(onboarded):
     payments = (await adv.get(f"/api/campaigns/{cid}/payments")).json()
     invoices = {i["recipient_id"].removeprefix("USR-"): i for i in payments["invoices"]}
     assert set(invoices) == set(agreed) and len({i["address"] for i in invoices.values()}) == 3
-    assert Decimal(payments["open_total"]) == fixed_total and payments["pay_all_uri"].startswith("zcash:?address=")
+    assert payments["currency"] == "USD" and Decimal(payments["open_total_usd"]) == fixed_total
+    assert Decimal(payments["open_total"]) == fixed_total / 100 and payments["open_asset"] == "TAZ"  # test rate: $100 per TAZ
+    assert payments["pay_all_uri"].startswith("zcash:?address=")
     invoice = invoices["ava"]
     assert invoice["status"] == "awaiting_payment" and invoice["simulated"] and invoice["direct"] and invoice["address"].startswith("utest1")
-    assert Decimal(invoice["amount"]) == Decimal(agreed["ava"]["terms"]["fixed_fee"])
+    assert Decimal(invoice["usd_amount"]) == Decimal(agreed["ava"]["terms"]["fixed_fee"]) and agreed["ava"]["terms"]["currency"] == "USD"
+    assert Decimal(invoice["amount"]) == Decimal(invoice["usd_amount"]) / Decimal(invoice["usd_rate"]) and invoice["asset"] == "TAZ"
     assert invoice["memo"].startswith("ZRV1:") and invoice["zip321_uri"].startswith(f"zcash:{invoice['address']}?amount=")
     assert all(d["state"] == "PAYMENT_REQUESTED" for k, d in (await by_influencer(adv, cid)).items() if k != "leo")
     # The public payment page shows what to pay, nothing about the campaign
@@ -347,7 +350,7 @@ async def test_status_and_wallet_never_expose_secrets(onboarded):
         status = (await adv.get("/api/status")).json()
         assert status["payment_mode"] == "simulated" and status["payments_simulated"] is True
         assert status["zcash"]["network"] == "testnet" and status["zcash"]["ticker"] == "TAZ" and status["zcash"]["direct_payments"] is True
-        assert status["zcash"]["testnet_notice"] == "Zcash Testnet — TAZ — No real monetary value"
+        assert status["zcash"]["testnet_notice"] == "Zcash Testnet — test payments only — No real monetary value"
         assert "rpc" not in json.dumps(status).lower() and "devtool_wallet_dir" not in json.dumps(status)
         mine = (await adv.get("/api/wallet/status")).json()
         assert mine["simulated"] and mine["your_address"] == ua("advertiser") and mine["custody"].startswith("none")

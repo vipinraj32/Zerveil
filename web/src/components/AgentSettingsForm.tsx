@@ -2,7 +2,7 @@ import { useState, type FormEvent } from "react";
 import { api } from "../api";
 import { useSession } from "../session";
 import { NichePicker } from "./NichePicker";
-import { ErrorText } from "./ui";
+import { ErrorText, UsdInput } from "./ui";
 
 /** The influencer's rate card and negotiation style. Floors are private: only the creator's own agent sees them. */
 export function AgentSettingsForm({ onSaved, submitLabel = "Save agent settings" }: { onSaved?: () => void; submitLabel?: string }) {
@@ -44,18 +44,18 @@ export function AgentSettingsForm({ onSaved, submitLabel = "Save agent settings"
       <NichePicker value={niches} onChange={setNiches} initial={u.niche_analysis} autoAnalyze={!u.rate_card} />
       <div className="grid-2">
         <label>
-          Opening ask (fixed fee, TAZ)
-          <input type="number" min="0.01" step="0.01" value={preferred} onChange={(e) => setPreferred(e.target.value)} required />
+          Opening ask, fixed fee ($)
+          <UsdInput type="number" min="0.01" step="0.01" value={preferred} onChange={(e) => setPreferred(e.target.value)} required />
           <small>Your agent counters from here.</small>
         </label>
         <label>
-          Floor: minimum fixed fee (TAZ)
-          <input type="number" min="0.01" step="0.01" value={fixedMin} onChange={(e) => setFixedMin(e.target.value)} required />
+          Floor: minimum fixed fee ($)
+          <UsdInput type="number" min="0.01" step="0.01" value={fixedMin} onChange={(e) => setFixedMin(e.target.value)} required />
           <small>Your agent never agrees below this, whatever the LLM suggests.</small>
         </label>
         <label>
-          Floor: minimum per 1,000 views (TAZ)
-          <input type="number" min="0" step="0.01" value={cpmMin} onChange={(e) => setCpmMin(e.target.value)} required />
+          Floor: minimum $ per 1,000 views
+          <UsdInput type="number" min="0" step="0.01" value={cpmMin} onChange={(e) => setCpmMin(e.target.value)} required suffix="/ 1K views" />
         </label>
       </div>
       <label>

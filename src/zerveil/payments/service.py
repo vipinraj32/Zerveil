@@ -1,6 +1,10 @@
 """Direct shielded Zcash payments: invoices to the recipient's own wallet, verified by a view-only scanner; receipts;
 payment links; prepaid API credit with spending limits.
 
+Every invoice is priced in USD (the business currency) and converted once, at creation, into the payment asset
+(shielded ZEC; TAZ on testnet, at a labeled test rate) with the quote stored on the invoice (see `zerveil.money`).
+Credit, spending limits and receipts are kept in USD; the scanner checks the asset amount.
+
 Rules this module keeps:
 - Zerveil holds no funds. Every invoice address is a fresh address of the recipient's own wallet account, derived
   from the viewing key the recipient connected. Nothing is routed through, held by or released from Zerveil.
@@ -24,6 +28,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from ..models import new_id
+from ..money import RateUnavailable, exact_usd, format_usd, quote
 from ..zcash.address import viewing_key_problem
 from ..zcash.memo import memo_for, reference_in
 from ..zcash.wallet import ReceivedNote, WalletError
@@ -151,13 +156,18 @@ class PaymentService:
 
     # ---- invoices ----------------------------------------------------------------------------------------------
 
-    async def create_invoice(self, purpose: InvoicePurpose, owner_id: str, recipient_id: str, title: str, amount: Decimal, *,
+    async def create_invoice(self, purpose: InvoicePurpose, owner_id: str, recipient_id: str, title: str, usd_amount: Decimal, *,
                              description: str = "", campaign_id: str | None = None, deal_ids: list[str] | None = None,
                              milestone_id: str | None = None, scope: str = "", ttl_minutes: int | None = None) -> Invoice:  # fmt: skip
-        if amount <= 0:
+        """A request for `usd_amount` USD, payable in the payment asset at a rate quoted now and stored on the invoice."""
+        if usd_amount <= 0:
             raise PaymentError("the amount must be positive")
-        if amount != amount.quantize(Decimal("0.00000001")):
-            raise PaymentError("ZEC amounts have at most 8 decimal places")
+        try:
+            usd_amount = exact_usd(usd_amount)
+            rate = quote(self.ctx.settings, self.ctx.clock.now())
+        except (ValueError, RateUnavailable) as e:
+            raise PaymentError(str(e)) from e
+        amount = rate.to_asset(usd_amount)
         account = await self.receiving_account(recipient_id)
         if account is None:
             who = "the API seller has" if recipient_id == API_SELLER else "the recipient has"
@@ -170,7 +180,8 @@ class PaymentService:
         except WalletError as e:
             raise PaymentError(f"could not derive a receiving address: {e}") from e
         invoice = Invoice(id=invoice_id, purpose=purpose, owner_id=owner_id, recipient_id=recipient_id, receiving_account_id=account.id,
-                          title=title[:120], description=description[:500], amount=amount, network=f"zcash-{self.ctx.settings.zcash_network}",
+                          title=title[:120], description=description[:500], currency="USD", usd_amount=usd_amount, asset=rate.asset,
+                          usd_rate=rate.usd_per_unit, rate_source=rate.source, test_rate=rate.is_test_rate, amount=amount, network=rate.network,
                           address=address, memo=memo_for(invoice_id), required_confirmations=self.ctx.settings.zcash_confirmation_threshold,
                           campaign_id=campaign_id, deal_ids=deal_ids or [], milestone_id=milestone_id, scope=scope,
                           simulated=self.scanner.simulated, created_at=now, expires_at=now + timedelta(minutes=ttl), updated_at=now)  # fmt: skip
@@ -178,7 +189,8 @@ class PaymentService:
             await self.ctx.store.save_invoice(invoice)
         except Exception as e:  # noqa: BLE001 - unique violation on the address
             raise PaymentError("the scanner returned an address already used by another invoice") from e
-        await self.event("invoice_created", invoice_id=invoice.id, purpose=purpose, amount=amount, recipient=recipient_id, simulated=invoice.simulated)
+        await self.event("invoice_created", invoice_id=invoice.id, purpose=purpose, usd_amount=usd_amount, amount=amount, asset=rate.asset,
+                         usd_rate=rate.usd_per_unit, test_rate=rate.is_test_rate, recipient=recipient_id, simulated=invoice.simulated)  # fmt: skip
         return invoice
 
     async def get_invoice(self, invoice_id: str) -> Invoice:
@@ -191,7 +203,7 @@ class PaymentService:
         """Everything a payer (human or agent) needs: address, amount, memo, ZIP-321 URI, link, expiry. No txids."""
         return {
             **invoice.public(),
-            "ticker": self.ctx.settings.ticker,
+            "ticker": invoice.asset or self.ctx.settings.ticker,  # the payment asset, never the business currency
             "direct": True,  # paid straight to the recipient's own wallet
             "zip321_uri": payment_uri(invoice.address, invoice.amount, invoice.memo, invoice.title),
             "pay_url": f"{self.ctx.settings.public_base_url.rstrip('/')}/pay/{invoice.id}",
@@ -330,6 +342,9 @@ class PaymentService:
                           mined_height=max((n.mined_height or 0 for n in live), default=0) or None, memo=invoice.memo,
                           campaign_id=invoice.campaign_id, deal_id=invoice.deal_ids[0] if invoice.deal_ids else None,
                           milestone_id=invoice.milestone_id, simulated=invoice.simulated, issued_at=self.ctx.clock.now())  # fmt: skip
+        if invoice.usd_amount is not None:
+            receipt.currency, receipt.usd_amount, receipt.asset = invoice.currency, invoice.usd_amount, invoice.asset
+            receipt.usd_rate, receipt.rate_source, receipt.test_rate = invoice.usd_rate, invoice.rate_source, invoice.test_rate
         receipt.receipt_hash = receipt.compute_hash()
         await self.ctx.store.save_receipt(receipt)
         await self.event("receipt_issued", invoice_id=invoice.id, receipt=receipt.id, receipt_hash=receipt.receipt_hash)
@@ -357,7 +372,7 @@ class PaymentService:
     # ---- payment links -------------------------------------------------------------------------------------------
 
     async def create_payment_link(self, creator_id: str, title: str, amount: Decimal, description: str = "", ttl_days: int = 14) -> Invoice:
-        """A shareable request to pay the creator directly; anyone can pay it from their own wallet."""
+        """A shareable request for `amount` USD, paid to the creator directly; anyone can pay it from their own wallet."""
         if await self.receiving_account(creator_id) is None:
             raise PaymentError("connect your receiving account's viewing key first: Zerveil confirms link payments with it")
         return await self.create_invoice("payment_link", creator_id, creator_id, title, amount, description=description,
@@ -373,17 +388,21 @@ class PaymentService:
         return await self.ctx.store.save_version(SPENDING_POLICY_KIND, user_id, policy.model_dump(mode="json"))
 
     async def create_topup(self, user_id: str, amount: Decimal) -> Invoice:
-        """Prepays API calls: paid directly to the API seller's wallet."""
+        """Prepays `amount` USD of API calls: paid directly to the API seller's wallet."""
         return await self.create_invoice("credit_topup", user_id, API_SELLER, "API credit top-up", amount,
                                          ttl_minutes=self.ctx.settings.api_invoice_ttl_minutes * 4)  # fmt: skip
 
     async def _credit_topup(self, invoice: Invoice) -> None:
         if not invoice.is_paid:
             return
-        entry = CreditEntry(id=new_id("CR"), user_id=invoice.owner_id, amount=invoice.received, kind="topup", ref=invoice.id,
+        if invoice.usd_amount is None:  # priced in TAZ before USD pricing: credit is USD now, so nothing is credited
+            await self.event("legacy_topup_not_credited", invoice_id=invoice.id, amount=invoice.received)
+            return
+        # Credit is the USD value that was requested; an overpayment is recorded on the invoice, not credited.
+        entry = CreditEntry(id=new_id("CR"), user_id=invoice.owner_id, amount=invoice.usd_amount, kind="topup", ref=invoice.id,
                             simulated=invoice.simulated, at=self.ctx.clock.now())  # fmt: skip
         if await self.ctx.store.add_credit(entry):
-            await self.event("credit_topped_up", invoice_id=invoice.id, amount=invoice.received)
+            await self.event("credit_topped_up", invoice_id=invoice.id, usd_amount=invoice.usd_amount)
 
     async def credit_summary(self, user_id: str) -> dict[str, Any]:
         day_start = self.ctx.clock.now() - timedelta(days=1)
@@ -404,24 +423,28 @@ class PaymentService:
                 return {"status": "paid", "reason": "already paid"}
             if invoice.status != "awaiting_payment" or self.ctx.clock.now() > invoice.expires_at:
                 return {"status": "refused", "reason": f"invoice is {invoice.status}"}
+            if invoice.usd_amount is None:
+                return {"status": "refused", "reason": "this invoice predates USD pricing"}
+            price = invoice.usd_amount
             policy = await self.spending_policy(user_id)
             spent = await self.ctx.store.spent_since(user_id, self.ctx.clock.now() - timedelta(days=1))
             balance = await self.ctx.store.credit_balance(user_id)
             checks = [
                 (policy.enabled, "agent payments are switched off"),
                 (category in policy.allowed_categories, f"category {category} is not allowed"),
-                (invoice.amount <= policy.max_per_request, f"{invoice.amount} is above the per-request limit {policy.max_per_request}"),
-                (spent + invoice.amount <= policy.max_daily, f"daily limit {policy.max_daily} reached ({spent} spent in 24 h)"),
-                (balance >= invoice.amount, f"API credit {balance} is less than {invoice.amount}: top up first"),
+                (price <= policy.max_per_request, f"{format_usd(price)} is above the per-request limit {format_usd(policy.max_per_request)}"),
+                (spent + price <= policy.max_daily, f"daily limit {format_usd(policy.max_daily)} reached ({format_usd(spent)} spent in 24 h)"),
+                (balance >= price, f"API credit {format_usd(balance)} is less than {format_usd(price)}: top up first"),
             ]
             problems = [msg for ok, msg in checks if not ok]
             if problems:
                 await self.event("agent_payment_refused", invoice_id=invoice.id, problems=problems)
                 return {"status": "refused", "reason": "; ".join(problems)}
-            if invoice.amount > policy.approval_above:
+            if price > policy.approval_above:
                 existing = next((r for r in await self.ctx.store.list_spend_requests(user_id, "pending") if r.invoice_id == invoice.id), None)
-                request = existing or SpendRequest(id=new_id("SR"), user_id=user_id, invoice_id=invoice.id, category=category, amount=invoice.amount,
-                                                   reason=f"above the auto-approve limit {policy.approval_above}", created_at=self.ctx.clock.now())  # fmt: skip
+                request = existing or SpendRequest(id=new_id("SR"), user_id=user_id, invoice_id=invoice.id, category=category, amount=price,
+                                                   reason=f"above the auto-approve limit {format_usd(policy.approval_above)}",
+                                                   created_at=self.ctx.clock.now())  # fmt: skip
                 await self.ctx.store.save_spend_request(request)
                 await self.event("agent_payment_needs_approval", invoice_id=invoice.id, request=request.id)
                 return {"status": "pending_approval", "reason": request.reason, "request_id": request.id}
@@ -441,7 +464,7 @@ class PaymentService:
         invoice = await self.get_invoice(request.invoice_id)
         async with self._spend_lock:
             balance = await self.ctx.store.credit_balance(user_id)
-            if balance < invoice.amount:
+            if invoice.usd_amount is None or balance < invoice.usd_amount:
                 return {"status": "refused", "reason": "not enough API credit"}
             if invoice.status == "awaiting_payment":
                 await self._settle_with_credit(user_id, invoice, request.category)
@@ -451,14 +474,15 @@ class PaymentService:
 
     async def _settle_with_credit(self, user_id: str, invoice: Invoice, category: str) -> None:
         """Credit was already paid to the API seller through a confirmed shielded top-up; spending it moves no ZEC."""
-        entry = CreditEntry(id=new_id("CR"), user_id=user_id, amount=-invoice.amount, kind="spend", ref=invoice.id, category=category,
+        assert invoice.usd_amount is not None
+        entry = CreditEntry(id=new_id("CR"), user_id=user_id, amount=-invoice.usd_amount, kind="spend", ref=invoice.id, category=category,
                             simulated=invoice.simulated, at=self.ctx.clock.now())  # fmt: skip
         if await self.ctx.store.add_credit(entry):
             invoice.status, invoice.paid_via, invoice.paid_at = "confirmed", "agent_credit", self.ctx.clock.now()
             invoice.received = invoice.amount
             invoice.updated_at = self.ctx.clock.now()
             await self.ctx.store.save_invoice(invoice)
-            await self.event("paid_from_api_credit", invoice_id=invoice.id, amount=invoice.amount, category=category)
+            await self.event("paid_from_api_credit", invoice_id=invoice.id, usd_amount=invoice.usd_amount, category=category)
 
     async def consume(self, invoice_id: str, user_id: str, scope: str) -> Invoice:
         """A paid API invoice unlocks its operation exactly once, for the user it was issued to."""

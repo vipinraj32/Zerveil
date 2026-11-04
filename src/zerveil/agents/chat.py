@@ -12,18 +12,18 @@ import hashlib
 from decimal import Decimal
 
 from ..models import Offer
-from ..zcash.amounts import ticker
+from ..money import format_usd
 
 DELIVERABLE = {"youtube_short": "YouTube Short", "youtube_video": "YouTube video"}
 BRIEF_CHARS = 160
 
 
 def money(v: Decimal | str) -> str:
-    return f"{Decimal(v):,.2f} {ticker()}"
+    return format_usd(Decimal(v), code=False)  # negotiation is in USD
 
 
 def pay_words(o: Offer) -> str:
-    """The offer in words: '1.20 TAZ up front plus 0.70 TAZ per 1,000 views, up to 4.00 TAZ in total'."""
+    """The offer in words: '$1.20 up front plus $0.70 per 1,000 views, up to $4.00 in total'."""
     fixed, cpm, cap = money(o.fixed_fee), money(o.cpm), money(o.cap)
     if o.compensation_model == "fixed":
         return f"{fixed} for the video"
@@ -33,7 +33,7 @@ def pay_words(o: Offer) -> str:
 
 
 def _moved(new: Offer, old: Offer | None) -> str:
-    """'up from 1.20 TAZ fixed and 0.70 TAZ per 1,000 views' when the amounts changed, else ''."""
+    """'up from $1.20 fixed and $0.70 per 1,000 views' when the amounts changed, else ''."""
     if old is None:
         return ""
     parts = []
