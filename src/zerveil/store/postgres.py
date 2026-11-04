@@ -18,6 +18,18 @@ from .migrations import migrate
 log = logging.getLogger(__name__)
 
 
+def _load_deals(rows: list[Any]) -> list[Deal]:
+    """Deals that no longer validate (data from an older version) are logged and skipped, so one old record can't stop
+    the scheduler or a listing. They stay in the table untouched."""
+    deals = []
+    for (data,) in rows:
+        try:
+            deals.append(Deal.model_validate(data))
+        except ValueError as e:
+            log.error("deal %s could not be read and is skipped: %s", data.get("id", "?") if isinstance(data, dict) else "?", e)
+    return deals
+
+
 # Hosted PostgreSQL (Render and similar) drops idle connections without telling the client. The pool checks each
 # connection before lending it out, retires idle ones before the server's own cut-off, and keeps sockets alive, so a
 # dead connection is replaced instead of failing the next query.
@@ -114,7 +126,7 @@ class PostgresStore:
             else:
                 cur = await conn.execute("SELECT data FROM deals WHERE campaign_id = %s ORDER BY id", (campaign_id,))
             rows = await cur.fetchall()
-        return [Deal.model_validate(r[0]) for r in rows]
+        return _load_deals(rows)
 
     async def add_event(self, event: AuditEvent) -> None:
         async with self.pool.connection() as conn:

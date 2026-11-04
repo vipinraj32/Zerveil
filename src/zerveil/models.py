@@ -14,7 +14,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 def new_id(prefix: str) -> str:
@@ -365,7 +365,7 @@ def transition_allowed(current: DealState, new: DealState) -> bool:
 class Approval(BaseModel):
     """A human decision bound to the exact terms it approved."""
 
-    kind: Literal["agreement", "compliance_review"]
+    kind: Literal["agreement", "compliance_review", "payment"]  # "payment": EVM-era wallet signature (history only)
     by: str  # user id
     approved: bool
     terms_hash: str
@@ -445,7 +445,7 @@ class Payout(BaseModel):
     """A payout decided for this deal by deterministic code. The money moves through its PayoutRequest
     (payments.models): an operator approves it and the Zcash wallet sends it; its delivery status lives there."""
 
-    payout_id: str  # PayoutRequest id
+    payout_id: str = ""  # PayoutRequest id; "" only on EVM-era history (see legacy_tx_hash)
     kind: Literal["fixed", "performance", "refund"]
     to: str
     amount: Decimal
@@ -453,6 +453,14 @@ class Payout(BaseModel):
     views: int | None = None  # performance payouts: the verified view count the amount was computed from
     evidence_hash: str = ""
     simulated: bool = False
+    legacy_tx_hash: str = ""  # payouts made by the removed EVM escrow, kept as read-only history
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_evm_payout(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "payout_id" not in data and "tx_hash" in data:
+            data = {**data, "legacy_tx_hash": data["tx_hash"]}
+        return data
 
 
 class Deal(BaseModel):
