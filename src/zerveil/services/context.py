@@ -76,7 +76,7 @@ def build_wallet(settings: Settings) -> tuple[PaymentScanner, list[str]]:
         from ..zcash.devtool import DevtoolScanner, server_arg
 
         if shutil.which(settings.zcash_devtool_bin) is None:
-            raise RuntimeError(f'PAYMENT_MODE=zcash: zcash-devtool binary not found ({settings.zcash_devtool_bin}); see README, "Wallet setup"')
+            raise RuntimeError(f'PAYMENT_MODE=zcash: zcash-devtool binary not found ({settings.zcash_devtool_bin}); see README, "Real testnet setup"')
         scanner = DevtoolScanner(
             binary=settings.zcash_devtool_bin,
             wallet_dir=settings.zcash_devtool_wallet_dir,

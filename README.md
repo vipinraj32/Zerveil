@@ -1,25 +1,110 @@
 # Zerveil
 
-**Private Payments. Autonomous Agents.**
+### Private Payments. Autonomous Agents.
 
-Zerveil is a privacy-powered AI influencer agent marketplace. Advertiser agents find creator agents and negotiate
-sponsorships with them over A2A. Advertisers then pay each creator **directly**, with **shielded Zcash**, to a fresh
-address of the creator's own wallet. Zerveil never holds the money. It issues invoices, watches the creator's account
-through a viewing key the creator connected, confirms the payment, issues a receipt and tracks the campaign.
+**AI agents negotiate influencer sponsorships. Brands pay creators directly with shielded Zcash. Nobody in between holds the money.**
 
-**Prices are in USD; payments are shielded ZEC.** Budgets, negotiated fees, signed terms, invoices' requested values,
-receipts and analytics are USD. What the advertiser actually sends is shielded ZEC (TAZ on testnet), converted from
-USD once per invoice. There is **no USD stablecoin on Zcash**, so Zerveil does not claim one, and on testnet the
-conversion uses a labeled **test rate** because TAZ has no market price. See [Currency](#currency-usd-prices-shielded-zec-payments).
+![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+![React](https://img.shields.io/badge/React-TypeScript-61DAFB?logo=react&logoColor=black)
+![LangGraph](https://img.shields.io/badge/LangGraph-agents-1C3C3C)
+![A2A](https://img.shields.io/badge/A2A-protocol-6E40C9)
+![MCP](https://img.shields.io/badge/MCP-read--only-555)
+![Zcash](https://img.shields.io/badge/Zcash-shielded%20testnet-F4B728?logo=zcash&logoColor=black)
 
-> **Zcash Testnet — test payments only — No real monetary value.**
-> - By default the app runs in `PAYMENT_MODE=simulated`: an in-process scanner stand-in runs the full flow, every
->   record is labeled *simulated*, and **no TAZ moves**.
-> - `PAYMENT_MODE=zcash` scans the real testnet with [zcash-devtool](https://github.com/zcash/zcash-devtool) through
->   the public lightwalletd `testnet.zec.rocks:443`. That path is tested against a stubbed `zcash-devtool` process; it
->   has **not yet been run against the live testnet by this project**. See [Status and blockers](#status-and-blockers).
-> - **There is no escrow.** Zerveil has no spending key and cannot hold, lock, release or refund funds. See
->   [Custody](#custody-there-is-none) and [PRIVACY.md](PRIVACY.md).
+> **Zcash Testnet — test payments only — no real monetary value.** Prices are in USD; payments are shielded TAZ
+> (testnet ZEC) converted at a clearly labeled *test rate*. Zerveil has **no escrow and no spending key**.
+
+<!-- Hackathon submission links: fill these in before submitting -->
+| | |
+|---|---|
+| 🎥 Demo video | _add link_ |
+| 🌐 Live app | _add link_ (runs in `simulated` payment mode) |
+| 📦 Repository | https://github.com/vipinraj32/Zerveil |
+
+---
+
+## TL;DR for judges
+
+| | |
+|---|---|
+| **Problem** | Influencer deals are negotiated by hand, payment is all-or-nothing trust, and on transparent chains every brand's spend and every creator's income is public. |
+| **Solution** | Each creator and each brand gets an AI agent. The agents negotiate over **A2A**, a **deterministic policy engine** (not the LLM) accepts or rejects, the creator's agent **signs the terms (Ed25519)**, and the brand pays the creator **wallet-to-wallet in shielded Zcash**, in milestones. |
+| **Privacy** | Amounts, payer, payee and memo are encrypted on-chain. Every invoice uses a fresh diversified shielded address. Zerveil confirms payments with the creator's **viewing key** only — it can see, never spend. |
+| **Trust** | *The LLM proposes, code decides, the payer's wallet signs.* No LLM or MCP tool can sign, invoice or move funds. A payment counts only when Zerveil's own scanner sees it with 3 confirmations — never from a txid a user types. |
+| **Business model** | USD prices everywhere (budgets, offers, signed terms, receipts). Agents pay for premium API calls themselves via **HTTP 402**, from prepaid credit, within owner-set spending limits. |
+
+## What makes it different
+
+- 🤝 **Agent-to-agent negotiation.** Advertiser and creator agents discover each other through A2A Agent Cards and
+  negotiate one creator at a time. Creator floors never leave the creator's side.
+- 🧮 **Code decides, not the model.** Every accept / counter / reject comes from `agent_policy/engine.py`
+  (no LLM, no I/O). The LLM only drafts messages and suggestions.
+- ✍️ **Signed, bound terms.** Deal terms (deliverable, fixed fee, CPM, cap, deadlines, proof rules, payee, network)
+  are signed by the creator agent's Ed25519 key and re-checked by a policy gate before any money is requested.
+- 🛡️ **Shielded, non-custodial payments.** No escrow, no operator wallet, no payout queue. One invoice per creator, a
+  fresh Orchard/Sapling address per invoice, ZIP-321 links + QR, and a "pay all" multi-recipient request.
+- 👁️ **View-only verification.** Creators connect a Unified Full Viewing Key with explicit consent; the database keeps
+  only a fingerprint. Invoices move `seen → mined → confirming → confirmed`, then a hashed receipt is issued.
+- 📺 **Proof of content.** The verifier checks the YouTube post (channel, timing, length, tags, disclosure, prompt
+  injection). At T+7d a performance fee (views × CPM, capped) is requested as a second milestone.
+- 💸 **Agents that pay their own way.** `GET /api/influencers/premium-search` answers **HTTP 402 Payment Required**
+  with a shielded invoice; agents pay from prepaid credit under per-request, daily and approval limits.
+- ⚖️ **Disclosure compliance.** Versioned India (ASCI) and US (FTC) disclosure rules, snapshotted per campaign.
+
+## Demo flow (5 minutes)
+
+1. **Creator** signs in with Google, links a YouTube channel, sets rates and a shielded Unified Address, and connects
+   a receiving account (viewing key + consent).
+2. **Advertiser** signs in, describes a campaign in plain English (budget in $). The agent turns it into a brief.
+3. Watch the **live negotiation room**: offers and counter-offers stream in over SSE; the policy engine explains each
+   decision.
+4. **Accept** the signed agreement → a per-creator invoice appears with a $ amount, QR code and `zcash:` link (the TAZ
+   amount and test rate are shown in a separate "test-only payment" box).
+5. **Pay** from any NU7-capable shielded wallet (or click *Simulate payment* in simulated mode) and watch it confirm,
+   then open the **receipt**.
+6. Creator submits the video → **verified** → jump the dev clock 7 days → performance invoice → **completed**.
+
+## Quick start
+
+Requirements: Python 3.13 + [uv](https://docs.astral.sh/uv/), Node 22. PostgreSQL optional (in-memory store otherwise).
+
+```bash
+git clone https://github.com/vipinraj32/Zerveil && cd Zerveil
+cp .env.example .env              # Google OAuth, SESSION_SECRET, YOUTUBE_API_KEY, ANTHROPIC_API_KEY
+uv sync                           # Windows: set UV_LINK_MODE=copy
+cd web && npm install && npm run build && cd ..
+uv run zerveil serve              # http://localhost:8000
+```
+
+- Default is `PAYMENT_MODE=simulated`: the full flow runs, every payment is labeled *simulated*, no TAZ moves.
+- For real shielded testnet payments set `PAYMENT_MODE=zcash` — see [Real testnet setup](#real-testnet-setup).
+- Tests: `uv run pytest` (backend) · `cd web && npm test` (frontend).
+
+## Tech stack
+
+| Layer | Tech |
+|---|---|
+| Agents | LangChain 1.x, LangGraph (Postgres checkpointing), Claude via `langchain-anthropic`, LangSmith tracing |
+| Agent protocols | A2A (`a2a-sdk`) for agent-to-agent negotiation · MCP (`FastMCP`, read-only) for tools |
+| Backend | Python 3.13, FastAPI, uvicorn, pydantic v2, psycopg 3 / PostgreSQL, SSE live updates |
+| Crypto | Ed25519 agent keys and delegation (`cryptography`) |
+| Payments | Zcash shielded testnet (NU7, Orchard → Ironwood, Sapling), `zcash-devtool` view-only scanner, lightwalletd, ZIP-316 / ZIP-317 / ZIP-321 |
+| Frontend | React + TypeScript + Vite, plain CSS, vitest |
+| Ops | Docker, GitHub Actions CI, Render |
+
+## Honest status
+
+- ✅ Full marketplace flow end to end, USD pricing, per-creator shielded invoices, receipts, milestones, HTTP 402 and
+  agent spending limits — covered by **223 backend tests** and frontend tests (payments run against the simulated
+  scanner and a stubbed `zcash-devtool`, and are labeled MOCKED).
+- ⏳ Real testnet mode (`PAYMENT_MODE=zcash`) is implemented and fail-closed, but this project has **not yet recorded a
+  live testnet transaction**. See [Status and blockers](#status-and-blockers).
+- ❌ No USD stablecoin: none exists on Zcash, so Zerveil never claims one.
+
+---
+
+# Technical details
 
 ## Contents
 
@@ -47,7 +132,6 @@ conversion uses a labeled **test rate** because TAZ has no market price. See [Cu
 22. [References](#references)
 
 ---
-
 ## The problem
 
 Influencer sponsorships are slow and leaky:
