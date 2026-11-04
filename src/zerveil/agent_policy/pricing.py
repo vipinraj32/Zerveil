@@ -6,7 +6,7 @@
 
 Eligible views are the YouTube viewCount read `views_measured_after_days` after publishing, for a post
 that is still public and still passes its proof checks (verifier). Amounts round down to 0.01 ZEC. The
-cap is always required: the escrow account must hold the most a deal can ever pay.
+cap is always required: it bounds the most a deal can ever pay (reserved from the campaign budget).
 
 Example: hybrid, 19 fixed + 2.50 CPM, 10,000 eligible views, 40 cap → 19 + 25 = 44 → capped at 40 (amounts in ZEC; TAZ on testnet).
 """
@@ -64,13 +64,13 @@ def rules() -> dict[str, object]:
     return {
         "version": PRICING_VERSION,
         "models": {
-            "fixed": "payable = fixed fee; the escrow cap equals the fixed fee",
+            "fixed": "payable = fixed fee; the cap equals the fixed fee",
             "cpm": "payable = min(cap, eligible views / 1000 × CPM)",
             "hybrid": "payable = min(cap, fixed fee + eligible views / 1000 × CPM)",
         },
         "eligible_views": "YouTube viewCount read N days after publishing (N is in the signed terms), only while the post "
         "is public and passes its proof checks",
         "rounding": "down to 0.01 ZEC",
-        "unpaid_remainder": "refunded from the escrow account to the advertiser's shielded refund address",
+        "unpaid_remainder": "never requested: each milestone is paid directly to the creator, so nothing is held or refunded",
         "example": example.as_dict(),
     }

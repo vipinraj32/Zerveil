@@ -101,8 +101,11 @@ class User(BaseModel):
     picture: str = ""
     role: Literal["advertiser", "influencer"]
     created_at: datetime
-    # Shielded Zcash Unified Address: where creators are paid, and where advertisers' unspent escrow is refunded
+    # The user's own shielded Unified Address (utest1… on testnet), from their own wallet. Creators are paid to their
+    # own wallet; advertisers pay from theirs. Zerveil never holds funds.
     zcash_address: str = ""
+    # The ReceivingAccount (viewing key) Zerveil uses to confirm payments to this creator; "" until connected
+    receiving_account_id: str = ""
     # advertiser
     company: str = ""
     brand_handle: str = ""
@@ -125,7 +128,9 @@ class User(BaseModel):
 
     def influencer_profile(self) -> InfluencerProfile | None:
         """The profile advertisers' agents see, once onboarding is complete."""
-        if self.role != "influencer" or not (self.channel and self.zcash_address and self.rate_card and self.niche and self.agent_signer):
+        if self.role != "influencer" or not (
+            self.channel and self.zcash_address and self.receiving_account_id and self.rate_card and self.niche and self.agent_signer
+        ):
             return None
         return InfluencerProfile(
             id=self.id,
@@ -200,7 +205,7 @@ class CampaignSpec(BaseModel):
     max_subscribers: int = 10_000_000
     max_fixed: Decimal  # most we pay as a fixed fee per creator
     max_cpm: Decimal  # most we pay per 1,000 views
-    cap_per_creator: Decimal  # escrow amount per deal (fixed + max performance)
+    cap_per_creator: Decimal  # most one deal can pay (fixed + max performance)
     deliverable: Literal["youtube_short", "youtube_video"] = "youtube_short"
     publish_within_days: int = 7
     required_tags: list[str] = Field(default_factory=lambda: ["#ad"])
@@ -211,7 +216,7 @@ class CampaignSpec(BaseModel):
     max_duration_seconds: int = 0  # 0 = no length rule
     requirements: str = ""
     owner_id: str = ""  # advertiser user
-    refund_address: str = ""  # advertiser's Unified Address: unspent escrow goes back here
+    refund_address: str = ""  # escrow-era history; payments now go directly to creators and nothing is refunded
     # Commercial structure: fixed (cap = fixed fee), cpm (no fixed fee) or hybrid (fixed + CPM up to the cap)
     compensation_model: CompensationModel = "hybrid"
     scope: ContentScope = Field(default_factory=ContentScope)
@@ -324,20 +329,24 @@ class DealState(StrEnum):
     ESCALATED = "ESCALATED"  # an agent's policy handed the decision to a human; nothing was agreed or reserved
     AGREED = "AGREED"
     BLOCKED = "BLOCKED"  # the deterministic policy gate refused the signed terms
-    AWAITING_APPROVAL = "AWAITING_APPROVAL"  # the advertiser approves the agreement before any funding is requested
-    AWAITING_FUNDING = "AWAITING_FUNDING"  # a shielded funding invoice is open
-    FUNDING = "FUNDING"  # the wallet sees the payment, waiting for confirmations
-    FUNDED = "FUNDED"  # the invoice is paid (wallet scan data) and the cap is held in the escrow account
-    PAYMENT_EXPIRED = "PAYMENT_EXPIRED"  # the funding invoice expired unpaid
+    AWAITING_APPROVAL = "AWAITING_APPROVAL"  # the advertiser accepts the agreement before any payment is requested
+    PAYMENT_REQUESTED = "PAYMENT_REQUESTED"  # the fixed-fee invoice (paid directly to the creator's wallet) is open
+    PAYMENT_PENDING = "PAYMENT_PENDING"  # the scanner sees the payment; waiting for confirmations
+    PAYMENT_EXPIRED = "PAYMENT_EXPIRED"  # the fixed-fee invoice expired unpaid
+    CONTENT_CREATION = "CONTENT_CREATION"  # the fixed fee is confirmed in the creator's wallet; the creator makes the post
     PROOF_SUBMITTED = "PROOF_SUBMITTED"
     PROOF_REJECTED = "PROOF_REJECTED"
-    VERIFIED = "VERIFIED"
-    FIXED_RELEASED = "FIXED_RELEASED"  # fixed-fee payout decided and handed to the payout queue
+    VERIFIED = "VERIFIED"  # the post passed verification (a compliance review may still be pending)
+    PERFORMANCE_DUE = "PERFORMANCE_DUE"  # verified; the performance milestone is computed at T+7d and requested
     DISPUTED = "DISPUTED"
     COMPLETED = "COMPLETED"
-    EXPIRED_REFUNDED = "EXPIRED_REFUNDED"
-    ARCHIVED = "ARCHIVED"  # closed by the migration from the former EVM payment flow
+    UNDELIVERED = "UNDELIVERED"  # the publish deadline passed without an accepted post (the fixed fee was already paid)
+    ARCHIVED = "ARCHIVED"  # closed by a migration (former EVM or escrow payment flows)
 
+
+# Escrow-era states (before migration 3). Deals stored in them load as ARCHIVED history.
+LEGACY_DEAL_STATES = {"AWAITING_FUNDING", "FUNDING", "FUNDED", "FIXED_RELEASED", "EXPIRED_REFUNDED", "CART_CREATED",
+                      "AWAITING_CHECKOUT", "SIGNED", "PAYMENT_UNKNOWN", "PAYMENT_FAILED"}  # fmt: skip
 
 # Every state change goes through DealService.save, which refuses anything not listed here.
 DEAL_TRANSITIONS: dict[DealState, frozenset[DealState]] = {
@@ -346,14 +355,14 @@ DEAL_TRANSITIONS: dict[DealState, frozenset[DealState]] = {
         DealState.NEGOTIATING: {DealState.AGREED, DealState.REJECTED, DealState.ESCALATED},
         DealState.ESCALATED: {DealState.REJECTED},
         DealState.AGREED: {DealState.AWAITING_APPROVAL, DealState.BLOCKED, DealState.REJECTED},
-        DealState.AWAITING_APPROVAL: {DealState.AWAITING_FUNDING, DealState.REJECTED},
-        DealState.AWAITING_FUNDING: {DealState.FUNDING, DealState.FUNDED, DealState.PAYMENT_EXPIRED},
-        DealState.FUNDING: {DealState.FUNDED, DealState.PAYMENT_EXPIRED},
-        DealState.FUNDED: {DealState.PROOF_SUBMITTED, DealState.PROOF_REJECTED, DealState.VERIFIED, DealState.EXPIRED_REFUNDED},
+        DealState.AWAITING_APPROVAL: {DealState.PAYMENT_REQUESTED, DealState.CONTENT_CREATION, DealState.REJECTED},
+        DealState.PAYMENT_REQUESTED: {DealState.PAYMENT_PENDING, DealState.CONTENT_CREATION, DealState.PAYMENT_EXPIRED},
+        DealState.PAYMENT_PENDING: {DealState.CONTENT_CREATION, DealState.PAYMENT_EXPIRED},
+        DealState.CONTENT_CREATION: {DealState.PROOF_SUBMITTED, DealState.PROOF_REJECTED, DealState.VERIFIED, DealState.UNDELIVERED},
         DealState.PROOF_SUBMITTED: {DealState.PROOF_REJECTED, DealState.VERIFIED},
-        DealState.PROOF_REJECTED: {DealState.PROOF_SUBMITTED, DealState.VERIFIED, DealState.EXPIRED_REFUNDED},
-        DealState.VERIFIED: {DealState.FIXED_RELEASED, DealState.PROOF_REJECTED, DealState.DISPUTED},
-        DealState.FIXED_RELEASED: {DealState.COMPLETED},
+        DealState.PROOF_REJECTED: {DealState.PROOF_SUBMITTED, DealState.VERIFIED, DealState.UNDELIVERED},
+        DealState.VERIFIED: {DealState.PERFORMANCE_DUE, DealState.PROOF_REJECTED, DealState.DISPUTED},
+        DealState.PERFORMANCE_DUE: {DealState.COMPLETED},
     }.items()
 }  # fmt: skip
 
@@ -442,18 +451,18 @@ class Proof(BaseModel):
 
 
 class Payout(BaseModel):
-    """A payout decided for this deal by deterministic code. The money moves through its PayoutRequest
-    (payments.models): an operator approves it and the Zcash wallet sends it; its delivery status lives there."""
+    """A payout made by a removed payment flow (EVM escrow, or the Zcash escrow wallet before migration 3). Kept as
+    read-only history; Zerveil no longer sends payments."""
 
-    payout_id: str = ""  # PayoutRequest id; "" only on EVM-era history (see legacy_tx_hash)
+    payout_id: str = ""
     kind: Literal["fixed", "performance", "refund"]
     to: str
     amount: Decimal
     at: datetime
-    views: int | None = None  # performance payouts: the verified view count the amount was computed from
+    views: int | None = None
     evidence_hash: str = ""
     simulated: bool = False
-    legacy_tx_hash: str = ""  # payouts made by the removed EVM escrow, kept as read-only history
+    legacy_tx_hash: str = ""  # payouts made by the removed EVM escrow
 
     @model_validator(mode="before")
     @classmethod
@@ -461,6 +470,28 @@ class Payout(BaseModel):
         if isinstance(data, dict) and "payout_id" not in data and "tx_hash" in data:
             data = {**data, "legacy_tx_hash": data["tx_hash"]}
         return data
+
+
+MilestoneStatus = Literal["scheduled", "requested", "pending", "confirmed", "expired", "waived"]
+
+
+class Milestone(BaseModel):
+    """One payment of a deal, decided by deterministic code and requested as its own invoice, paid by the advertiser
+    directly to the creator's wallet. `fixed` is requested when the advertiser accepts the agreement; `performance`
+    is computed from verified views at T+7d."""
+
+    id: str  # MS-…
+    kind: Literal["fixed", "performance"]
+    amount: Decimal
+    status: MilestoneStatus = "scheduled"
+    invoice_id: str | None = None
+    receipt_id: str | None = None
+    due_at: datetime | None = None
+    requested_at: datetime | None = None
+    confirmed_at: datetime | None = None
+    views: int | None = None  # performance: the verified view count the amount was computed from
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    evidence_hash: str = ""
 
 
 class Deal(BaseModel):
@@ -474,32 +505,49 @@ class Deal(BaseModel):
     approved_terms_hash: str | None = None  # terms hash the payment authorization was drafted for
     approvals: list[Approval] = Field(default_factory=list)
     agreed_at: datetime | None = None
-    funding_invoice_id: str | None = None  # shielded invoice that funds this deal (shared by the deals approved together)
-    funded_at: datetime | None = None
-    funding_simulated: bool = False
+    milestones: list[Milestone] = Field(default_factory=list)
+    payment_simulated: bool = False  # the milestone invoices were confirmed by the simulated scanner
+    funding_invoice_id: str | None = None  # escrow-era history
     proof: Proof | None = None
     proof_history: list[Proof] = Field(default_factory=list)  # earlier submissions, oldest first
-    payouts: list[Payout] = Field(default_factory=list)
+    payouts: list[Payout] = Field(default_factory=list)  # removed payment flows: read-only history
     archived_reason: str = ""
-    fixed_release_due: datetime | None = None
     performance_due: datetime | None = None
     policy_violations: list[str] = Field(default_factory=list)
     updated_at: datetime | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_state(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.get("state") in LEGACY_DEAL_STATES:
+            reason = data.get("archived_reason") or f"closed with the escrow flow (was {data['state']})"
+            data = {**data, "state": "ARCHIVED", "archived_reason": reason}
+        return data
+
+    def milestone(self, kind: str) -> Milestone | None:
+        return next((m for m in self.milestones if m.kind == kind), None)
+
 
 class Campaign(BaseModel):
     spec: CampaignSpec
-    status: Literal["planning", "negotiating", "awaiting_approval", "funding", "active", "done", "failed"] = "planning"
+    status: Literal["planning", "negotiating", "awaiting_approval", "awaiting_payment", "active", "done", "failed"] = "planning"
     created_at: datetime
     error: str = ""
     negotiation_cancelled: bool = False  # the advertiser stopped the creator queue: no further negotiations start
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_status(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.get("status") == "funding":
+            data = {**data, "status": "awaiting_payment"}
+        return data
 
 
 class AuditEvent(BaseModel):
     at: datetime
     campaign_id: str
     deal_id: str | None = None
-    actor: str  # advertiser-agent, influencer-agent:<id>, policy, wallet, verifier, escrow, human
+    actor: str  # advertiser-agent, influencer-agent:<id>, policy, scanner, verifier, payments, human
     kind: str
     detail: dict[str, Any] = Field(default_factory=dict)
 

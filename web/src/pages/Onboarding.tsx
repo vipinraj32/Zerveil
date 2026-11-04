@@ -3,6 +3,7 @@ import { Navigate, useNavigate } from "react-router";
 import { api } from "../api";
 import { AgentSettingsForm } from "../components/AgentSettingsForm";
 import { Avatar, Card, ErrorText } from "../components/ui";
+import { ReceivingAccountPanel } from "../components/ReceivingAccount";
 import { ZcashAddressForm } from "../components/ZcashAddressForm";
 import { num } from "../format";
 import { useMe, useSession } from "../session";
@@ -66,11 +67,9 @@ export function Onboarding() {
       <Card title="Set up your advertiser account" className="narrow">
         <ol className="steps">
           <Step n={1} title={`Signed in with Google as ${user.email}`} done active={false} />
-          <Step n={2} title="Add your shielded refund address (Unified Address)" done={!!user.zcash_address} active={!user.zcash_address}>
-            <ZcashAddressForm submitLabel="Save refund address" />
-          </Step>
-          <Step n={3} title="Brand details" done={profile_complete} active={!!user.zcash_address && !profile_complete}>
+          <Step n={2} title="Brand details" done={profile_complete} active={!profile_complete}>
             <AdvertiserProfile />
+            <p className="muted small">You pay creators directly from your own Zcash wallet; Zerveil never holds your money.</p>
           </Step>
         </ol>
       </Card>
@@ -79,6 +78,7 @@ export function Onboarding() {
 
   const ch = user.channel;
   const addressDone = !!user.zcash_address && !!user.delegation_signature;
+  const receivingDone = !!user.receiving_account_id;
   return (
     <Card title="Set up your creator agent" className="narrow">
       <ol className="steps">
@@ -96,10 +96,17 @@ export function Onboarding() {
             </div>
           </div>
         )}
-        <Step n={2} title="Add your shielded payout address (Unified Address)" done={addressDone} active={!!ch && !addressDone}>
-          <ZcashAddressForm submitLabel="Save payout address" />
+        <Step n={2} title="Add your own shielded address (Unified Address)" done={addressDone} active={!!ch && !addressDone}>
+          <ZcashAddressForm submitLabel="Save address" />
         </Step>
-        <Step n={3} title="Set your rates and switch your agent on" done={profile_complete} active={addressDone && !profile_complete}>
+        <Step n={3} title="Connect your receiving account (viewing key)" done={receivingDone} active={addressDone && !receivingDone}>
+          <p className="small">
+            Advertisers pay you directly, into your own wallet. Connect a viewing key so Zerveil can confirm those payments; you are not listed for deals
+            until you do.
+          </p>
+          <ReceivingAccountPanel />
+        </Step>
+        <Step n={4} title="Set your rates and switch your agent on" done={profile_complete} active={addressDone && receivingDone && !profile_complete}>
           <AgentSettingsForm submitLabel="Activate my agent" onSaved={() => navigate("/influencer")} />
         </Step>
       </ol>

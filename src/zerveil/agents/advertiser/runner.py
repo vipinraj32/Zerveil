@@ -15,7 +15,7 @@ from .graph import build_advertiser_graph
 log = logging.getLogger(__name__)
 START_ATTEMPTS = 3  # a run that fails to reach the database before it starts is retried this many times
 # Steps a restarted server may resume on its own: negotiation and the policy gate. Approval waits for the
-# advertiser, and the funding request is never re-entered automatically.
+# advertiser, and the payment request is never re-entered automatically.
 RESUMABLE = {"discover", "negotiate_next", "prepare_payments"}
 
 

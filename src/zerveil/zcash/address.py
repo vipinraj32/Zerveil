@@ -2,8 +2,8 @@
 
 A Unified Address is Bech32m-encoded (without Bech32's 90-character limit) with the human-readable part `u`
 (mainnet), `utest` (testnet) or `uregtest` (regtest). This module checks the encoding, checksum and network only.
-Whether the receivers inside are valid (F4Jumble, Orchard/Sapling key encodings) is for the wallet to decide: in
-zcash mode the app also asks the wallet (`z_listunifiedreceivers`) before it stores a payout address.
+Whether the receivers inside are valid (F4Jumble, Orchard/Sapling key encodings) is for a wallet to decide. Invoice
+addresses are derived by the scanner from the recipient's own viewing key, so they always belong to the recipient.
 """
 
 from __future__ import annotations
@@ -106,3 +106,29 @@ def network_of(address: str) -> str:
 
 def short(address: str) -> str:
     return address if len(address) <= 24 else f"{address[:12]}…{address[-8:]}"
+
+
+UFVK_HRP: dict[str, str] = {"mainnet": "uview", "testnet": "uviewtest", "regtest": "uviewregtest"}
+UIVK_HRP: dict[str, str] = {"mainnet": "uivk", "testnet": "uivktest", "regtest": "uivkregtest"}
+
+
+def viewing_key_problem(key: str, network: Network) -> str | None:
+    """Why `key` cannot be connected as a Unified Full Viewing Key on `network`, or None when the format is right.
+    Refuses anything that looks like a seed phrase or a spending key: Zerveil must never receive those."""
+    key = key.strip()
+    if not key:
+        return "paste the Unified Full Viewing Key of your receiving account"
+    if len(key.split()) >= 12:
+        return "this looks like a seed phrase. Never share it: Zerveil only needs a viewing key"
+    if key.startswith(("secret-extended-key", "usk", "uskt", "SK")):
+        return "this looks like a spending key. Never share it: Zerveil only needs a viewing key"
+    decoded = bech32m_decode(key)
+    if decoded is None:
+        return "not a valid Unified Full Viewing Key (bad characters or checksum)"
+    hrp = decoded[0]
+    if hrp == UIVK_HRP[network]:
+        return "this is an incoming viewing key; the scanner needs the Unified Full Viewing Key (starts with uviewtest1)"
+    if hrp != UFVK_HRP[network]:
+        other = next((n for n, h in UFVK_HRP.items() if h == hrp), None)
+        return f"this is a {other} viewing key; Zerveil runs on Zcash {network}" if other else f"not a Unified Full Viewing Key (prefix {hrp})"
+    return None

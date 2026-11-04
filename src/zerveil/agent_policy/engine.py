@@ -122,7 +122,7 @@ def _influencer_hard_checks(policy: InfluencerPolicy, offer: Offer, requirements
     forbidden = {c.strip().lower() for c in h.forbidden_categories}
     rows = [
         (Decimal(0) <= offer.fixed_fee <= offer.cap and offer.cap > 0 and offer.cpm >= 0, "offer_well_formed", Action.REJECT,
-         "The offer is malformed: amounts must be non-negative and the fixed fee within the escrow cap.", f"fixed {offer.fixed_fee}, cap {offer.cap}"),
+         "The offer is malformed: amounts must be non-negative and the fixed fee within the cap.", f"fixed {offer.fixed_fee}, cap {offer.cap}"),
         (requirements_hash(requirements) == offer.requirements_hash, "brief_matches_signed_hash", Action.REJECT,
          "The content requirements received do not match the offer.", "hash of the received brief differs from the offer"),
         (disclosure_ok, "sponsorship_disclosure", Action.REJECT,
@@ -209,7 +209,7 @@ def decide_for_influencer(
     if failed:
         action, public, private = failed[1], failed[2], f"hard constraint {failed[0].name}: {failed[0].detail}"
     elif not money[2].passed:
-        action, public, private = Action.REJECT, "The escrow cap cannot cover this creator's fee.", money[2].detail
+        action, public, private = Action.REJECT, "The deal cap cannot cover this creator's fee.", money[2].detail
     elif all(c.passed for c in money) and score >= policy.preferences.min_acceptable_score:
         action, public, private = Action.ACCEPT, "Accepted: the offer meets this creator's requirements.", f"score {score}"
     elif last_round:

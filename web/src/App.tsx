@@ -18,7 +18,8 @@ import { Landing } from "./pages/landing/Landing";
 import { Login } from "./pages/Login";
 import { Onboarding } from "./pages/Onboarding";
 import { PublicPay } from "./pages/PublicPay";
-import { PayoutApprovals } from "./pages/admin/PayoutApprovals";
+import { AdminPayments } from "./pages/admin/AdminPayments";
+import { ReceiptView, Receipts } from "./pages/Receipts";
 import { WalletPayments } from "./pages/advertiser/WalletPayments";
 import { CreatorPayments } from "./pages/influencer/CreatorPayments";
 import { useSession } from "./session";
@@ -64,7 +65,11 @@ const router = createBrowserRouter([
         <Layout />
       </Guard>
     ),
-    children: [{ path: "/admin/payouts", element: <PayoutApprovals /> }],
+    children: [
+      { path: "/admin/payments", element: <AdminPayments /> },
+      { path: "/receipts", element: <Receipts /> },
+      { path: "/receipts/:id", element: <ReceiptView /> },
+    ],
   },
   {
     element: (

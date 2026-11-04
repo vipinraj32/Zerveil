@@ -13,7 +13,8 @@ const NAV = {
     { to: "/advertiser/new", label: "New campaign", icon: "plus" },
     { to: "/advertiser/creators", label: "Creators", icon: "users" },
     { to: "/advertiser/agent", label: "My agent", icon: "bot" },
-    { to: "/advertiser/payments", label: "Wallet & payments", icon: "wallet" },
+    { to: "/advertiser/payments", label: "Payments", icon: "wallet" },
+    { to: "/receipts", label: "Receipts", icon: "ledger" },
   ],
   influencer: [
     { to: "/influencer", label: "Overview", icon: "home", end: true },
@@ -21,6 +22,7 @@ const NAV = {
     { to: "/influencer/agent", label: "My agent", icon: "bot" },
     { to: "/influencer/profile", label: "My profile", icon: "users" },
     { to: "/influencer/payments", label: "Payments", icon: "wallet" },
+    { to: "/receipts", label: "Receipts", icon: "ledger" },
   ],
 };
 
@@ -61,9 +63,9 @@ export function Layout() {
           {is_admin && (
             <>
               <p className="sidebar-label">Operator</p>
-              <NavLink to="/admin/payouts">
+              <NavLink to="/admin/payments">
                 <Icon name="shield" size={20} />
-                Payout approvals
+                Payments (read-only)
               </NavLink>
             </>
           )}
@@ -113,10 +115,13 @@ export function Layout() {
           <Avatar src={user.picture} name={user.name} size={30} />
         </header>
         <div className="netbar" role="status">
-          <span className="testnet-chip">
-            Zcash {status?.zcash.network ?? "testnet"} · {status?.zcash.network === "mainnet" ? "real ZEC" : `${status?.zcash.ticker ?? "TAZ"} has no value`}
-          </span>
-          {status?.payments_simulated && <span className="testnet-chip warn">Simulated payments: no ZEC moves</span>}
+          {status?.zcash.testnet_notice ? (
+            <span className="testnet-chip testnet-notice">{status.zcash.testnet_notice}</span>
+          ) : (
+            <span className="testnet-chip">Zcash {status?.zcash.network ?? "testnet"}</span>
+          )}
+          <span className="testnet-chip">Direct payments · Zerveil holds no funds</span>
+          {status?.payments_simulated && <span className="testnet-chip warn">Simulated — no ZEC moved</span>}
         </div>
         <main className="main">
           <Outlet />

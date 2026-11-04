@@ -216,9 +216,65 @@ UPDATE users SET data = (data - 'wallet' - 'delegation' - 'delegation_signature'
  WHERE data ? 'wallet' AND NOT (data ? 'zcash_address');
 """
 
+# 003: direct payments, no escrow. Zerveil stops holding funds: payers pay the creator's (or API seller's) own wallet,
+# and a view-only scanner confirms receipt. Nothing is deleted:
+# - payout_requests (the escrow payout queue) is renamed legacy_escrow_payouts and kept as read-only history;
+# - deals still inside the escrow flow are archived with a reason (their money is in the operator's escrow wallet and
+#   must be settled by the operator outside Zerveil), and their budget reservations are released;
+# - open escrow invoices (campaign funding, top-ups and links paid to the escrow wallet) are cancelled; paid ones keep
+#   their history under the new status names (paid → confirmed, pending → awaiting_payment, late_payment → expired).
+DIRECT_PAYMENTS = """
+CREATE TABLE IF NOT EXISTS receiving_accounts (
+    id            TEXT PRIMARY KEY,
+    owner_id      TEXT NOT NULL,
+    role          TEXT NOT NULL,
+    authorized_at TIMESTAMPTZ NOT NULL,
+    revoked_at    TIMESTAMPTZ,
+    data          JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS receiving_accounts_owner_idx ON receiving_accounts (owner_id, authorized_at);
+CREATE TABLE IF NOT EXISTS payment_receipts (
+    id           TEXT PRIMARY KEY,
+    invoice_id   TEXT NOT NULL UNIQUE,
+    payer_id     TEXT NOT NULL DEFAULT '',
+    recipient_id TEXT NOT NULL,
+    issued_at    TIMESTAMPTZ NOT NULL,
+    data         JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS receipts_payer_idx ON payment_receipts (payer_id, issued_at);
+CREATE INDEX IF NOT EXISTS receipts_recipient_idx ON payment_receipts (recipient_id, issued_at);
+CREATE TABLE IF NOT EXISTS deal_milestones (
+    id         TEXT PRIMARY KEY,
+    deal_id    TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    status     TEXT NOT NULL,
+    invoice_id TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS deal_milestones_deal_idx ON deal_milestones (deal_id);
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS recipient_id TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS invoices_recipient_idx ON invoices (recipient_id, created_at);
+ALTER TABLE IF EXISTS payout_requests RENAME TO legacy_escrow_payouts;
+UPDATE deals
+   SET state = 'ARCHIVED',
+       data = jsonb_set(data, '{state}', '"ARCHIVED"')
+              || jsonb_build_object('archived_reason', 'closed by the move to direct payments (escrow state ' || state || '); '
+                                    || 'any funds still in the escrow wallet are settled by the operator')
+ WHERE state IN ('AWAITING_FUNDING', 'FUNDING', 'FUNDED', 'PROOF_SUBMITTED', 'PROOF_REJECTED', 'VERIFIED', 'FIXED_RELEASED',
+                 'DISPUTED', 'EXPIRED_REFUNDED');
+DELETE FROM budget_reservations WHERE deal_id IN (SELECT id FROM deals WHERE state = 'ARCHIVED');
+UPDATE invoices SET status = 'cancelled', data = jsonb_set(data, '{status}', '"cancelled"')
+ WHERE status IN ('pending', 'underpaid', 'confirming');
+UPDATE invoices SET status = 'confirmed', data = jsonb_set(data, '{status}', '"confirmed"') WHERE status = 'paid';
+UPDATE invoices SET status = 'expired', data = jsonb_set(data, '{status}', '"expired"') WHERE status = 'late_payment';
+UPDATE invoices SET purpose = 'milestone', data = jsonb_set(data, '{purpose}', '"milestone"') WHERE purpose = 'campaign_funding';
+UPDATE campaigns SET data = jsonb_set(data, '{status}', '"awaiting_payment"') WHERE data->>'status' = 'funding';
+"""
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "baseline", BASELINE),
     Migration(2, "zcash_payments", ZCASH_PAYMENTS),
+    Migration(3, "direct_payments", DIRECT_PAYMENTS),
 ]
 
 LEDGER = """

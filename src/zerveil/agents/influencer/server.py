@@ -46,7 +46,7 @@ def agent_card(me: InfluencerIdentity, url: str) -> AgentCard:
                 tags=[*p.all_niches, "youtube_short", f"channel:{p.channel_id}"],
             ),
             AgentSkill(
-                id="settlement-updates", name="Settlement updates", description="Receives funded / payout notices (shielded Zcash).", tags=["zcash", "payments"]
+                id="settlement-updates", name="Settlement updates", description="Receives payment notices (direct shielded Zcash).", tags=["zcash", "payments"]
             ),
         ],
     )
@@ -82,7 +82,7 @@ class InfluencerExecutor(AgentExecutor):
             if self.record is not None:
                 await self.record(result["decision"])
             return {"type": "negotiation_reply", **result["reply"]}
-        if kind in ("funded", "payout"):
+        if kind in ("payment_requested", "payment_confirmed"):
             self.inbox.append(data)
             return {"type": "ack", "message": f"{self.me.profile.name} received {kind} for {data.get('deal_id')}"}
         return {"type": "error", "message": f"unsupported message type {kind!r}"}

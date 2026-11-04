@@ -1,3 +1,5 @@
+import { WalletStatusPanel } from "../components/Payments";
+import { ReceivingAccountPanel } from "../components/ReceivingAccount";
 import { Avatar, Card } from "../components/ui";
 import { ZcashAddressForm } from "../components/ZcashAddressForm";
 import { num, when } from "../format";
@@ -36,13 +38,21 @@ export function Account() {
           </p>
         </Card>
       )}
-      <Card title={user.role === "influencer" ? "Zcash address · payouts" : "Zcash address · refunds"}>
+      <Card title="Your Zcash address">
         <ZcashAddressForm />
+      </Card>
+      {user.role === "influencer" && (
+        <Card title="Receiving account (viewing key)">
+          <ReceivingAccountPanel />
+        </Card>
+      )}
+      <Card title="Network and scanner">
+        <WalletStatusPanel />
       </Card>
       {user.role === "influencer" && user.agent_signer && (
         <Card title="Agent signing key">
           <p className="mono small">{user.agent_signer}</p>
-          <p className="muted small">Your creator agent signs deal terms with this key. It was authorized when you saved your payout address.</p>
+          <p className="muted small">Your creator agent signs deal terms with this key. It was authorized when you saved your shielded address.</p>
         </Card>
       )}
     </div>

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import { MODEL_LABEL, humanize, termsText } from "../format";
+import { MODEL_LABEL, humanize, termsText, zec } from "../format";
 import { useLiveEvents, useResource } from "../live";
 import { useSession } from "../session";
 import type { AuditEvent, Deal } from "../types";
@@ -86,7 +86,8 @@ export function ActivityChart({ events, deals }: { events: AuditEvent[]; deals: 
     return out;
   };
   const paid = new Array<number>(days).fill(0);
-  for (const p of deals.flatMap((d) => d.payouts)) if (p.kind !== "refund") paid[bucket(p.at)] += Number(p.amount);
+  // milestone payments the scanner confirmed in creators' wallets
+  for (const m of deals.flatMap((d) => d.milestones ?? [])) if (m.status === "confirmed" && m.confirmed_at) paid[bucket(m.confirmed_at)] += Number(m.amount);
   const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
 
   const metrics: Metric[] = [
@@ -97,7 +98,7 @@ export function ActivityChart({ events, deals }: { events: AuditEvent[]; deals: 
       total: String(sum(count((e) => e.kind.startsWith("negotiation")))),
       points: count((e) => e.kind.startsWith("negotiation")),
     },
-    { key: "paid", label: "Paid out", total: `$${sum(paid).toFixed(2)}`, points: paid },
+    { key: "paid", label: "Paid to creators", total: zec(sum(paid)), points: paid },
   ];
   const m = metrics.find((x) => x.key === metric) ?? metrics[0];
   const max = Math.max(1, ...m.points);
@@ -107,7 +108,7 @@ export function ActivityChart({ events, deals }: { events: AuditEvent[]; deals: 
   const y = (v: number) => H - (v / max) * (H - 8);
   const line = m.points.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
   const label = (i: number) => new Date(start.getTime() + i * DAY).toLocaleDateString("en-US", { month: "short", day: "numeric" });
-  const fmt = (v: number) => (m.key === "paid" ? `$${v.toFixed(2)}` : String(v));
+  const fmt = (v: number) => (m.key === "paid" ? zec(v) : String(v));
   const h = hover ?? days - 1;
 
   return (
@@ -161,7 +162,7 @@ export function ActivityChart({ events, deals }: { events: AuditEvent[]; deals: 
   );
 }
 
-/** Simulated payments only: moves the platform clock so releases and refunds can be tested. */
+/** Simulated payments only: moves the platform clock so deadlines and the day-7 performance milestone can be tested. */
 export function DevClock() {
   const { status, refresh } = useSession();
   const [msg, setMsg] = useState<string | null>(null);
@@ -170,14 +171,14 @@ export function DevClock() {
     setMsg(null);
     try {
       const r = await api.advance(hours);
-      setMsg(`+${r.clock_offset_hours.toFixed(0)} h · ${r.actions} escrow action(s)`);
+      setMsg(`+${r.clock_offset_hours.toFixed(0)} h · ${r.actions} scheduled action(s)`);
       await refresh();
     } catch (e) {
       setMsg(e instanceof Error ? e.message : String(e));
     }
   }
   return (
-    <div className="devclock" title="Simulated payments only: moves the platform clock to trigger releases and refunds">
+    <div className="devclock" title="Simulated payments only: moves the platform clock to trigger deadlines and milestones">
       <span>Dev clock {status.clock_offset_hours ? `+${status.clock_offset_hours.toFixed(0)} h` : "now"}</span>
       <button type="button" onClick={() => advance(49)}>
         +49 h

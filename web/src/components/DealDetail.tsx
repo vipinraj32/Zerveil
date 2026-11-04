@@ -7,7 +7,7 @@ import type { Deal } from "../types";
 import { ContentReportView } from "./ContentChecks";
 import { LiveNegotiation } from "./LiveNegotiation";
 import { NegotiationRoom } from "./NegotiationRoom";
-import { DealFunding, PaymentLifecycle, PayoutRequestsTable } from "./Payments";
+import { LegacyPaymentHistory, MilestoneTable, PaymentLifecycle } from "./Payments";
 import { ProofHistory, ProofReviewCard } from "./ProofReview";
 import { Timeline } from "./Timeline";
 import { Card, Empty, StateBadge } from "./ui";
@@ -19,8 +19,12 @@ export function DealDetail({ deal, title, actions, conversation = true }: { deal
   // the advertiser reads this history in the campaign's Audit trail tab: no second copy here
   const events = useResource(() => (role === "advertiser" ? Promise.resolve([]) : api.dealEvents(deal.id)), `${deal.id}:${role}`);
   useLiveEvents((e) => e.deal_id === deal.id, events.reload);
+  // the payment requests of this deal's milestones come with GET /api/deals/{id} only
+  const milestones = deal.milestones ?? [];
+  const full = useResource(() => (milestones.length ? api.deal(deal.id) : Promise.resolve(null)), `${deal.id}:full:${milestones.map((m) => m.status).join(",")}`);
+  useLiveEvents((e) => e.deal_id === deal.id || e.type === "invoice", full.reload);
   const t = deal.terms;
-  const paid = deal.payouts.filter((p) => p.kind !== "refund").reduce((s, p) => s + Number(p.amount), 0);
+  const paid = milestones.filter((m) => m.status === "confirmed").reduce((s, m) => s + Number(m.amount), 0);
 
   return (
     <Card title={title} actions={<StateBadge state={deal.state} />} className="deal-detail">
@@ -28,7 +32,7 @@ export function DealDetail({ deal, title, actions, conversation = true }: { deal
 
       {deal.policy_violations.length > 0 && (
         <div className="notice tone-bad">
-          <strong>Policy blocked this payment:</strong>
+          <strong>Policy blocked this deal:</strong>
           <ul>
             {deal.policy_violations.map((v) => (
               <li key={v}>{v}</li>
@@ -59,7 +63,7 @@ export function DealDetail({ deal, title, actions, conversation = true }: { deal
             <dd>{zec(t.fixed_fee)}</dd>
             <dt>Per 1,000 views</dt>
             <dd>{zec(t.cpm)}</dd>
-            <dt>Escrow cap</dt>
+            <dt>Cap (most it can pay)</dt>
             <dd>{zec(t.cap)}</dd>
             <dt>Publish by</dt>
             <dd>{when(t.publish_by)}</dd>
@@ -98,14 +102,8 @@ export function DealDetail({ deal, title, actions, conversation = true }: { deal
         </>
       )}
 
-      {(deal.funding_invoice_id || deal.funding_invoice) && (
-        <>
-          <h3>Funding (shielded {t?.asset ?? "ZEC"})</h3>
-          <DealFunding deal={deal} />
-        </>
-      )}
-
       {deal.archived_reason && <div className="notice tone-neutral">Archived: {deal.archived_reason}</div>}
+      {deal.state === "ARCHIVED" && <LegacyPaymentHistory payouts={deal.payouts} />}
 
       {deal.proof && (
         <>
@@ -127,18 +125,18 @@ export function DealDetail({ deal, title, actions, conversation = true }: { deal
             <p className="small muted">Creator attested: {Object.keys(deal.proof.attestations).map(humanize).join(", ")} (statements, not machine-verified)</p>
           )}
           <p className="muted small">
-            Views at check: {num(deal.proof.views)} · fixed fee due {when(deal.fixed_release_due)} · performance due {when(deal.performance_due)}
+            Views at check: {num(deal.proof.views)} · performance fee computed {when(deal.performance_due)}
           </p>
           <ProofHistory history={deal.proof_history ?? []} />
         </>
       )}
 
       {/* the creator's deal page shows these in its own Payment card, at the top */}
-      {role === "advertiser" && (deal.funded_at || deal.payouts.length > 0) && (
+      {role === "advertiser" && milestones.length > 0 && (
         <>
-          <h3>Payouts · {zec(paid)} to creator</h3>
+          <h3>Payments · {zec(paid)} confirmed in the creator's wallet</h3>
           <PaymentLifecycle deal={deal} />
-          <PayoutRequestsTable payouts={deal.payout_requests ?? []} showTo={false} />
+          <MilestoneTable deal={deal} invoices={full.data?.milestone_invoices} />
         </>
       )}
 

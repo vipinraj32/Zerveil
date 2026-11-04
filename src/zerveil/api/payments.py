@@ -1,32 +1,36 @@
-"""Zcash payment endpoints.
+"""Direct Zcash payment endpoints. Zerveil holds no funds: every invoice is paid straight to the recipient's own wallet
+and confirmed by the view-only scanner.
 
 GET  /api/pay/{id}                          public payment page data (no transaction ids, no campaign terms)
-GET  /api/payments/invoices[/{id}]          the caller's invoices; one with its detected notes and audit trail
+GET  /api/payments/invoices[/{id}]          invoices the caller pays or receives; one with its notes and audit trail
 POST /api/payments/invoices/{id}/cancel     an invoice that received nothing
-POST /api/payments/links                    creator payment link (paid in → forwarded to the creator's address)
-GET  /api/payments/payouts                  payouts to the caller
-GET  /api/wallet/status                     network, backend, reachability (balance for admins only)
+POST /api/payments/links                    creator payment link (paid directly to the creator's own wallet)
+GET|PUT|DELETE /api/receiving-account       the creator's viewing-key connection (watch-only, cannot spend)
+GET  /api/receipts[/{id}]                   receipts of confirmed payments the caller made or received
+GET  /api/campaigns/{id}/payments           a campaign's milestone invoices (+ one ZIP-321 request for the open ones)
+GET  /api/wallet/status                     network, scanner, chain tip, NU7 status, faucet link; never credentials
 GET|PUT /api/agent/spending-policy          the advertiser agent's spending limits
-GET  /api/agent/credit                      prepaid agent credit, ledger and pending approvals
-POST /api/agent/credit/topup                a shielded top-up invoice
+GET  /api/agent/credit                      prepaid API credit, ledger and pending approvals
+POST /api/agent/credit/topup                a top-up invoice, paid directly to the API seller's wallet
 POST /api/agent/spend-requests/{id}         approve or reject an agent payment above the auto-approve limit
-GET  /api/influencers/premium-search        HTTP 402: pay a shielded invoice, retry with X-Payment-Id
+GET  /api/influencers/premium-search        HTTP 402: pay the API seller's invoice, retry with X-Payment-Id
 POST /api/agent/premium-search              the advertiser's agent pays the 402 from credit, within its limits
-/api/admin/...                              payout approval queue, unknown-outcome resolution, custody view
-POST /api/dev/payments/{id}/simulate        PAYMENT_MODE=simulated only: the in-process wallet "receives" a payment
+/api/admin/...                              payment events, invoices, scanner status (operators cannot move funds)
+POST /api/dev/payments/{id}/simulate        PAYMENT_MODE=simulated only: the stand-in scanner "receives" a payment
 """
 
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..models import Campaign, DealState, User
-from ..payments.models import Invoice, SpendingPolicy
-from ..payments.service import PaymentError
+from ..payments.models import OPEN_INVOICE, Invoice, Receipt, SpendingPolicy
+from ..payments.service import API_SELLER, AUTHORIZATION, PaymentError
+from ..zcash.zip321 import multi_payment_uri
 
 if TYPE_CHECKING:
     from .app import State
@@ -44,14 +48,10 @@ class TopupIn(BaseModel):
     amount: Decimal = Field(gt=0, le=1_000, decimal_places=8)
 
 
-class PayoutDecisionIn(BaseModel):
-    approved: bool
-    note: str = Field(default="", max_length=300)
-
-
-class ResolveIn(BaseModel):
-    action: Literal["resend", "cancel"]
-    note: str = Field(min_length=3, max_length=300)  # what the operator checked in the wallet
+class ViewingKeyIn(BaseModel):
+    ufvk: str = Field(min_length=10, max_length=2000)  # Unified Full Viewing Key of the creator's receiving account
+    birthday: int = Field(ge=0, le=100_000_000)  # block height the account was created at (scanning starts there)
+    consent: bool  # the creator agrees to the authorization statement
 
 
 class SpendDecisionIn(BaseModel):
@@ -84,19 +84,26 @@ def register_payment_routes(
 
     async def admin(user: CurrentUser) -> User:
         if not is_admin(user):
-            raise HTTPException(403, "payout operators only (ADMIN_EMAILS)")
+            raise HTTPException(403, "operators only (ADMIN_EMAILS)")
         return user
 
     AdminUser = Annotated[User, Depends(admin)]
 
-    def owner_view(invoice: Invoice) -> dict[str, Any]:
-        """The payer's (or link owner's) own view: adds the notes the wallet detected, with transaction ids."""
+    def party_view(invoice: Invoice) -> dict[str, Any]:
+        """The payer's and recipient's view: adds the notes the scanner detected, with transaction ids."""
         return {**payments().payment_request(invoice), "notes": [n.model_dump(mode="json") for n in invoice.notes], "campaign_id": invoice.campaign_id,
-                "deal_ids": invoice.deal_ids, "scope": invoice.scope, "paid_via": invoice.paid_via, "consumed_at": invoice.consumed_at}  # fmt: skip
+                "deal_ids": invoice.deal_ids, "milestone_id": invoice.milestone_id, "recipient_id": invoice.recipient_id, "scope": invoice.scope,
+                "paid_via": invoice.paid_via, "consumed_at": invoice.consumed_at, "receipt_id": invoice.receipt_id}  # fmt: skip
 
-    async def own_invoice(invoice_id: str, user: User) -> Invoice:
-        invoice = await payments().get_invoice(invoice_id)
-        if invoice.owner_id != user.id and not is_admin(user):
+    def is_party(invoice: Invoice, user: User) -> bool:
+        return user.id in (invoice.owner_id, invoice.recipient_id) or is_admin(user)
+
+    async def party_invoice(invoice_id: str, user: User) -> Invoice:
+        try:
+            invoice = await payments().get_invoice(invoice_id)
+        except PaymentError as e:
+            raise HTTPException(404, "payment not found") from e
+        if not is_party(invoice, user):
             raise HTTPException(404, "payment not found")
         return invoice
 
@@ -110,60 +117,141 @@ def register_payment_routes(
         except PaymentError as e:
             raise HTTPException(404, "payment not found") from e
         out = payments().payment_request(invoice)
-        if invoice.purpose == "payment_link" and (creator := await state.ctx.store.get_user(invoice.owner_id)):
+        if invoice.purpose == "payment_link" and (creator := await state.ctx.store.get_user(invoice.recipient_id or invoice.owner_id)):
             out["payee_name"] = creator.channel.title if creator.channel else creator.name
         return out
 
-    # ---- invoices and payouts of the signed-in user -----------------------------------------------------------
+    # ---- invoices of the signed-in user ------------------------------------------------------------------------
 
     @app.get("/api/payments/invoices")
     async def my_invoices(user: CurrentUser) -> list[dict[str, Any]]:
-        return [owner_view(i) for i in await state.ctx.store.list_invoices(owner_id=user.id)]
+        mine = {i.id: i for i in await state.ctx.store.list_invoices(owner_id=user.id)}
+        for i in await state.ctx.store.list_invoices():
+            if i.recipient_id == user.id:
+                mine[i.id] = i
+        return [party_view(i) for i in sorted(mine.values(), key=lambda i: i.created_at, reverse=True)]
 
     @app.get("/api/payments/invoices/{invoice_id}")
     async def my_invoice(invoice_id: str, user: CurrentUser) -> dict[str, Any]:
-        invoice = await own_invoice(invoice_id, user)
+        invoice = await party_invoice(invoice_id, user)
         events = await state.ctx.store.list_payment_events(invoice_id=invoice.id)
-        return {**owner_view(invoice), "events": [e.model_dump(mode="json") for e in events]}
+        return {**party_view(invoice), "events": [e.model_dump(mode="json") for e in events]}
 
     @app.post("/api/payments/invoices/{invoice_id}/cancel")
     async def cancel_invoice(invoice_id: str, user: CurrentUser) -> dict[str, Any]:
-        invoice = await own_invoice(invoice_id, user)
-        if invoice.purpose == "campaign_funding":
-            raise HTTPException(409, "funding invoices expire on their own; their deals are then closed")
-        return owner_view(await payments().cancel_invoice(invoice, user.id))
+        invoice = await party_invoice(invoice_id, user)
+        if invoice.purpose == "milestone":
+            raise HTTPException(409, "milestone invoices expire on their own; their deals are then closed")
+        if invoice.owner_id != user.id:
+            raise HTTPException(403, "only the invoice's owner can cancel it")
+        try:
+            return party_view(await payments().cancel_invoice(invoice, user.id))
+        except PaymentError as e:
+            raise HTTPException(409, str(e)) from e
 
     @app.post("/api/payments/links", status_code=201)
     async def create_link(body: LinkIn, user: CurrentUser) -> dict[str, Any]:
         if user.role != "influencer":
             raise HTTPException(403, "payment links are for creators")
-        return owner_view(await payments().create_payment_link(user.id, body.title, body.amount, body.description))
+        try:
+            return party_view(await payments().create_payment_link(user.id, body.title, body.amount, body.description))
+        except PaymentError as e:
+            raise HTTPException(409, str(e)) from e
 
-    @app.get("/api/payments/payouts")
-    async def my_payouts(user: CurrentUser) -> list[dict[str, Any]]:
-        return [p.model_dump(mode="json", exclude={"evidence"}) for p in await state.ctx.store.list_payouts(beneficiary_id=user.id)]
-
-    @app.get("/api/campaigns/{campaign_id}/payouts")
-    async def campaign_payouts(campaign_id: str, user: AdvertiserUser) -> list[dict[str, Any]]:
+    @app.get("/api/campaigns/{campaign_id}/payments")
+    async def campaign_payments(campaign_id: str, user: AdvertiserUser) -> dict[str, Any]:
+        """The campaign's milestone invoices. Each pays one creator's own wallet; `pay_all_uri` is one ZIP-321 request
+        covering every open one (wallets that support multi-payment requests pay them in one transaction)."""
         await readable_campaign(campaign_id, user)
-        out = []
-        for p in await state.ctx.store.list_payouts(campaign_id=campaign_id):
-            row = p.model_dump(mode="json", exclude={"evidence"})
-            if p.kind != "refund":
-                row["to_address"] = "shielded address (private to the creator)"
-            out.append(row)
+        invoices = await state.ctx.store.list_invoices(campaign_id=campaign_id, purpose="milestone")
+        open_ = [i for i in invoices if i.status == "awaiting_payment" and not i.notes]
+        uri = multi_payment_uri([(i.address, i.amount, i.memo, i.title) for i in open_]) if open_ else None
+        return {"invoices": [party_view(i) for i in invoices], "pay_all_uri": uri,
+                "open_total": str(sum((i.amount for i in open_), Decimal("0"))), "summary": await state.deals.payment_summary(campaign_id)}  # fmt: skip
+
+    # ---- receiving account (viewing key) -----------------------------------------------------------------------
+
+    def account_view(user: User, account: Any) -> dict[str, Any]:
+        return {
+            "connected": account is not None,
+            "authorization": AUTHORIZATION,
+            "your_address": user.zcash_address,
+            "account": None if account is None else account.model_dump(mode="json", include={"id", "backend", "key_fingerprint", "birthday", "network",
+                                                                                               "authorized_at", "simulated"}),
+        }  # fmt: skip
+
+    @app.get("/api/receiving-account")
+    async def get_receiving_account(user: CurrentUser) -> dict[str, Any]:
+        return account_view(user, await payments().receiving_account(user.id))
+
+    @app.put("/api/receiving-account")
+    async def connect_receiving_account(body: ViewingKeyIn, user: CurrentUser) -> dict[str, Any]:
+        """The creator connects a viewing key of their own receiving account. Never a seed phrase or spending key:
+        those are refused. The key is handed to the scanner; the database keeps a fingerprint."""
+        if user.role != "influencer":
+            raise HTTPException(403, "receiving accounts are for creators: advertisers pay from their own wallet")
+        try:
+            account = await payments().connect_viewing_key(user.id, "creator", body.ufvk, body.birthday, consent=body.consent)
+        except PaymentError as e:
+            raise HTTPException(400, str(e)) from e
+        user.receiving_account_id = account.id
+        await state.ctx.store.save_user(user)
+        return account_view(user, account)
+
+    @app.delete("/api/receiving-account")
+    async def disconnect_receiving_account(user: CurrentUser) -> dict[str, Any]:
+        await payments().disconnect_viewing_key(user.id)
+        user.receiving_account_id = ""
+        await state.ctx.store.save_user(user)
+        return account_view(user, None)
+
+    # ---- receipts ------------------------------------------------------------------------------------------------
+
+    def receipt_view(receipt: Receipt) -> dict[str, Any]:
+        out = receipt.model_dump(mode="json")
+        out["explorer_urls"] = [state.settings.zcash_explorer_tx_url.format(txid=t) for t in receipt.txids] if state.settings.zcash_explorer_tx_url else []
         return out
+
+    @app.get("/api/receipts")
+    async def my_receipts(user: CurrentUser) -> list[dict[str, Any]]:
+        return [receipt_view(r) for r in await state.ctx.store.list_receipts(user.id)]
+
+    @app.get("/api/receipts/{receipt_id}")
+    async def get_receipt(receipt_id: str, user: CurrentUser) -> dict[str, Any]:
+        try:
+            receipt = await payments().get_receipt(receipt_id)
+        except PaymentError as e:
+            raise HTTPException(404, "receipt not found") from e
+        if user.id not in (receipt.payer_id, receipt.recipient_id) and not is_admin(user):
+            raise HTTPException(404, "receipt not found")
+        return receipt_view(receipt)
+
+    # ---- network and scanner status ----------------------------------------------------------------------------
 
     @app.get("/api/wallet/status")
     async def wallet_status(user: CurrentUser) -> dict[str, Any]:
         info = await state.ctx.wallet.info()
-        out = {"backend": info.backend, "network": info.network, "simulated": info.simulated, "reachable": info.reachable,
-               "detail": info.detail if is_admin(user) else "", "your_address": user.zcash_address}  # fmt: skip
-        if is_admin(user):
-            out["escrow_balance"] = str(info.escrow_balance) if info.escrow_balance is not None else None
-        return out
+        account = await payments().receiving_account(user.id)
+        received = sum((i.received for i in await state.ctx.store.list_invoices() if i.recipient_id == user.id and i.is_paid
+                        and i.paid_via == "shielded"), Decimal("0"))  # fmt: skip
+        return {
+            "backend": info.backend,
+            "network": info.network,
+            "simulated": info.simulated,
+            "reachable": info.reachable,
+            "tip_height": info.tip_height,
+            "nu7_activation_height": info.nu7_activation_height,
+            "nu7_active": info.nu7_active,
+            "warnings": info.warnings,
+            "detail": info.detail if is_admin(user) else "",
+            "faucet_url": state.settings.zcash_faucet_url if state.settings.zcash_network == "testnet" else None,
+            "your_address": user.zcash_address,
+            "receiving_account_connected": account is not None,
+            "confirmed_received_via_zerveil": str(received),  # what the scanner confirmed in your wallet (not a wallet balance)
+            "custody": "none: Zerveil never holds funds",
+        }
 
-    # ---- agent credit and spending limits -------------------------------------------------------------------
+    # ---- prepaid API credit and spending limits -----------------------------------------------------------------
 
     @app.get("/api/agent/spending-policy")
     async def get_spending_policy(user: AdvertiserUser) -> dict[str, Any]:
@@ -179,11 +267,17 @@ def register_payment_routes(
 
     @app.post("/api/agent/credit/topup", status_code=201)
     async def topup(body: TopupIn, user: AdvertiserUser) -> dict[str, Any]:
-        return owner_view(await payments().create_topup(user.id, body.amount))
+        try:
+            return party_view(await payments().create_topup(user.id, body.amount))
+        except PaymentError as e:
+            raise HTTPException(503, str(e)) from e
 
     @app.post("/api/agent/spend-requests/{request_id}")
     async def decide_spend(request_id: str, body: SpendDecisionIn, user: AdvertiserUser) -> dict[str, Any]:
-        return await payments().decide_spend_request(user.id, request_id, body.approved)
+        try:
+            return await payments().decide_spend_request(user.id, request_id, body.approved)
+        except PaymentError as e:
+            raise HTTPException(409, str(e)) from e
 
     # ---- HTTP 402: premium creator search ----------------------------------------------------------------------
 
@@ -210,35 +304,24 @@ def register_payment_routes(
 
     def payment_required(invoice: Invoice) -> JSONResponse:
         req = payments().payment_request(invoice)
+        keys = ("id", "network", "ticker", "amount", "address", "memo", "zip321_uri", "pay_url", "expires_at", "status", "confirmations",
+                "required_confirmations", "simulated", "direct")  # fmt: skip
         body = {
             "error": "payment_required",
-            "detail": "Pay this shielded Zcash invoice, then repeat the request with the header X-Payment-Id. "
-            "Access unlocks only after the wallet sees the payment confirmed; a transaction id is not accepted as proof.",
-            "payment": {
-                k: req[k]
-                for k in (
-                    "id",
-                    "network",
-                    "ticker",
-                    "amount",
-                    "address",
-                    "memo",
-                    "zip321_uri",
-                    "pay_url",
-                    "expires_at",
-                    "status",
-                    "confirmations",
-                    "required_confirmations",
-                    "simulated",
-                )
-            },  # fmt: skip
+            "detail": "Pay this shielded Zcash invoice (it pays the API seller's own wallet directly), then repeat the request with the header "
+            "X-Payment-Id. Access unlocks only after the scanner sees the payment confirmed; a transaction id is not accepted as proof.",
+            "payment": {k: req[k] for k in keys},
             "retry_with_header": {"X-Payment-Id": invoice.id},
         }
         return JSONResponse(body, status_code=402, headers={"X-Payment-Id": invoice.id})
 
     async def premium_invoice(user: User, scope: str) -> Invoice:
-        return await payments().create_invoice("api_access", user.id, "Zerveil premium creator search", state.settings.premium_search_price,
-                                               scope=scope, ttl_minutes=state.settings.api_invoice_ttl_minutes)  # fmt: skip
+        try:
+            return await payments().create_invoice("api_access", user.id, API_SELLER, "Zerveil premium creator search",
+                                                   state.settings.premium_search_price, scope=scope,
+                                                   ttl_minutes=state.settings.api_invoice_ttl_minutes)  # fmt: skip
+        except PaymentError as e:
+            raise HTTPException(503, str(e)) from e
 
     @app.get("/api/influencers/premium-search", responses={402: {"description": "Payment required: a shielded Zcash invoice"}})
     async def premium_search(user: AdvertiserUser, niche: str = Query(min_length=2, max_length=40),
@@ -248,8 +331,8 @@ def register_payment_routes(
             invoice = await state.ctx.store.get_invoice(x_payment_id)
             if invoice is None or invoice.owner_id != user.id or invoice.scope != scope:
                 raise HTTPException(400, "X-Payment-Id does not belong to this request")
-            if invoice.status != "paid":
-                if invoice.status in ("pending", "underpaid", "confirming"):
+            if not invoice.is_paid:
+                if invoice.status in OPEN_INVOICE:
                     return payment_required(invoice)  # not paid (or not confirmed) yet: same invoice again
                 raise HTTPException(402, f"payment {invoice.id} is {invoice.status}: request a new one without X-Payment-Id")
             try:
@@ -261,52 +344,37 @@ def register_payment_routes(
 
     @app.post("/api/agent/premium-search")
     async def agent_premium_search(body: AgentSearchIn, user: AdvertiserUser) -> dict[str, Any]:
-        """The advertiser's agent runs the 402 flow itself: gets the invoice, pays it from prepaid agent credit if the
+        """The advertiser's agent runs the 402 flow itself: gets the invoice, pays it from prepaid API credit if the
         spending policy allows (otherwise asks its owner), then unlocks the results."""
         scope = f"{PREMIUM_CATEGORY}:{body.niche.lower()}"
         invoice = await premium_invoice(user, scope)
         decision = await payments().agent_pay(user.id, invoice, PREMIUM_CATEGORY)
-        out: dict[str, Any] = {"invoice": owner_view(await payments().get_invoice(invoice.id)), "payment": decision}
+        out: dict[str, Any] = {"invoice": party_view(await payments().get_invoice(invoice.id)), "payment": decision}
         if decision["status"] == "paid":
             await payments().consume(invoice.id, user.id, scope)
             out["results"] = await premium_results(body.niche)
         return out
 
-    # ---- operators: payout approval and custody -------------------------------------------------------------
+    # ---- operators: read-only payment views -------------------------------------------------------------------
 
-    @app.get("/api/admin/payouts")
-    async def admin_payouts(_: AdminUser, status: str | None = None) -> list[dict[str, Any]]:
-        statuses = set(status.split(",")) if status else None
-        return [p.model_dump(mode="json") for p in await state.ctx.store.list_payouts(status=statuses)]
-
-    @app.post("/api/admin/payouts/{payout_id}/decision")
-    async def admin_decide(payout_id: str, body: PayoutDecisionIn, user: AdminUser) -> dict[str, Any]:
-        payout = await payments().decide_payout(payout_id, user.email, body.approved, body.note)
-        await payments().process_payouts()  # send now rather than at the next tick
-        return (await payments().get_payout(payout.id)).model_dump(mode="json")
-
-    @app.post("/api/admin/payouts/{payout_id}/resolve")
-    async def admin_resolve(payout_id: str, body: ResolveIn, user: AdminUser) -> dict[str, Any]:
-        return (await payments().resolve_unknown(payout_id, user.email, body.action, body.note)).model_dump(mode="json")
-
-    @app.get("/api/admin/custody")
-    async def admin_custody(_: AdminUser) -> dict[str, Any]:
-        return await payments().custody()
+    @app.get("/api/admin/scanner")
+    async def admin_scanner(_: AdminUser) -> dict[str, Any]:
+        return await payments().scanner_status()
 
     @app.get("/api/admin/payment-events")
-    async def admin_events(_: AdminUser, invoice_id: str | None = None, payout_id: str | None = None) -> list[dict[str, Any]]:
-        return [e.model_dump(mode="json") for e in await state.ctx.store.list_payment_events(invoice_id=invoice_id, payout_id=payout_id)]
+    async def admin_events(_: AdminUser, invoice_id: str | None = None) -> list[dict[str, Any]]:
+        return [e.model_dump(mode="json") for e in await state.ctx.store.list_payment_events(invoice_id=invoice_id)]
 
     @app.get("/api/admin/invoices")
     async def admin_invoices(_: AdminUser) -> list[dict[str, Any]]:
-        return [owner_view(i) for i in await state.ctx.store.list_invoices()]
+        return [party_view(i) for i in await state.ctx.store.list_invoices()]
 
     # ---- development: simulated payments ---------------------------------------------------------------------
 
     @app.post("/api/dev/payments/{invoice_id}/simulate")
     async def simulate(invoice_id: str, body: SimulateIn, user: CurrentUser) -> dict[str, Any]:
-        """PAYMENT_MODE=simulated only. The stand-in wallet receives the payment; the normal scanner then verifies it
-        exactly as it would real wallet data. The result is labeled simulated everywhere."""
+        """PAYMENT_MODE=simulated only. The stand-in scanner receives the payment; the normal scan then verifies it
+        exactly as it would real scanner data. The result is labeled simulated everywhere."""
         if not state.ctx.wallet.simulated:
             raise HTTPException(400, "only available with PAYMENT_MODE=simulated: pay with a real Zcash wallet instead")
         invoice = await payments().get_invoice(invoice_id)

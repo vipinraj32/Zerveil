@@ -26,7 +26,8 @@ export interface User {
   picture: string;
   role: Role;
   created_at: string;
-  zcash_address: string; // shielded Unified Address ("" if unset): payout address (creator) or refund address (advertiser)
+  zcash_address: string; // the user's own shielded Unified Address ("" if unset); creators are paid to their own wallet
+  receiving_account_id: string; // creators: the connected viewing key's receiving account ("" until connected)
   company: string;
   brand_handle: string;
   channel: ChannelInfo | null;
@@ -53,12 +54,15 @@ export interface Me {
 export interface ZcashInfo {
   network: "testnet" | "mainnet" | "regtest";
   ticker: "TAZ" | "ZEC";
-  wallet_backend: "simulated" | "zallet";
+  wallet_backend: string;
+  /** Always true: payments go straight to the recipient's own wallet; Zerveil holds no funds. */
+  direct_payments: boolean;
   confirmations_required: number;
-  fee_reserve_per_deal: string;
-  payout_approval_required: boolean;
   /** "" = no explorer links; otherwise a template with "{txid}" or a prefix to append the txid to. */
   explorer_tx_url: string;
+  faucet_url: string | null;
+  /** "Zcash Testnet — TAZ — No real monetary value" on testnet, otherwise null. */
+  testnet_notice: string | null;
 }
 
 export interface PlatformStatus {
@@ -130,7 +134,7 @@ export interface CampaignSpec {
   requirements: string;
   content_checks: ContentCheck[];
   owner_id: string;
-  refund_address: string;
+  refund_address?: string; // legacy (earlier payment flow), unused
   compensation_model: CompensationModel;
   scope: ContentScope;
   category: string;
@@ -153,7 +157,7 @@ export interface ContentScope {
   deliverable_count: number;
 }
 
-export type CampaignStatus = "planning" | "negotiating" | "awaiting_approval" | "funding" | "active" | "done" | "failed";
+export type CampaignStatus = "planning" | "negotiating" | "awaiting_approval" | "awaiting_payment" | "active" | "done" | "failed";
 
 export interface Campaign {
   spec: CampaignSpec;
@@ -162,35 +166,56 @@ export interface Campaign {
   error: string;
 }
 
-/** The budget is a spending limit, not money held: reserved = caps of deals being or already paid. */
-export interface FundingSummary {
+/** The budget is a spending limit, not money held: reserved = caps of deals that may still be paid or were paid;
+ * paid = milestone payments the scanner confirmed in creators' wallets. */
+export interface PaymentSummary {
   budget: string;
   reserved: string;
-  funded: string;
+  paid: string;
+  requested: string;
   remaining: string;
 }
 
 export interface PendingApproval {
   campaign_id: string;
   deals: string[];
-  total: string;
-  invoice_amount: string;
+  total: string; // sum of caps
+  upfront: string; // sum of fixed fees, requested right after acceptance
   network: string;
-  fee_reserve_per_deal: string;
+  direct: true;
 }
 
 export interface CampaignDetail extends Campaign {
   pending_approval: PendingApproval | null;
-  funding_invoices: PaymentRequest[];
-  funding: FundingSummary;
+  payment_invoices: PaymentRequest[];
+  payments: PaymentSummary;
+}
+
+/** GET /api/campaigns/{id}/payments */
+export interface CampaignPayments {
+  invoices: OwnerInvoice[];
+  /** One ZIP-321 multi-recipient request covering every open invoice, or null when nothing is open. */
+  pay_all_uri: string | null;
+  open_total: string;
+  summary: PaymentSummary;
 }
 
 // ---- shielded Zcash payments (src/zerveil/payments) ------------------------------------
 
-export type InvoicePurpose = "campaign_funding" | "api_access" | "credit_topup" | "payment_link";
-export type InvoiceStatus = "pending" | "underpaid" | "confirming" | "paid" | "expired" | "late_payment" | "cancelled";
+export type InvoicePurpose = "milestone" | "api_access" | "credit_topup" | "payment_link";
+export type InvoiceStatus =
+  | "awaiting_payment"
+  | "seen"
+  | "mined"
+  | "confirming"
+  | "confirmed"
+  | "underpaid"
+  | "overpaid"
+  | "expired"
+  | "failed"
+  | "cancelled";
 
-/** An invoice as the payer sees it (public). */
+/** An invoice as the payer sees it (public). Paid directly to the recipient's own wallet. */
 export interface PaymentRequest {
   id: string;
   purpose: InvoicePurpose;
@@ -211,6 +236,8 @@ export interface PaymentRequest {
   ticker: string;
   zip321_uri: string;
   pay_url: string;
+  /** Always true: the address belongs to the recipient's own wallet account. */
+  direct: boolean;
   payee_name?: string;
 }
 
@@ -221,6 +248,8 @@ export interface InvoiceNote {
   output_index: number;
   amount: string;
   confirmations: number;
+  mined_height: number | null;
+  expired: boolean;
   memo_matched: boolean;
   first_seen_at: string;
 }
@@ -228,56 +257,109 @@ export interface InvoiceNote {
 export interface PaymentEvent {
   at: string;
   invoice_id: string | null;
-  payout_id: string | null;
   kind: string;
   detail: Record<string, unknown>;
 }
 
-/** The owner's view of an invoice. */
+/** The payer's and recipient's view of an invoice: adds the notes the scanner detected. */
 export interface OwnerInvoice extends PaymentRequest {
   notes: InvoiceNote[];
   campaign_id: string | null;
   deal_ids: string[];
+  milestone_id: string | null;
+  recipient_id: string;
   scope: string;
   paid_via: string;
   consumed_at: string | null;
+  receipt_id: string | null;
   events?: PaymentEvent[];
 }
 
-export type PayoutStatus = "pending_approval" | "approved" | "sending" | "submitted" | "sent" | "confirmed" | "failed" | "rejected" | "unknown";
+/** A milestone invoice as GET /api/deals/{id} returns it. */
+export interface MilestoneInvoice extends PaymentRequest {
+  milestone_id: string;
+  kind: "fixed" | "performance";
+  receipt_id: string | null;
+}
 
-export interface PayoutRequest {
+/** GET|PUT|DELETE /api/receiving-account */
+export interface ReceivingAccountView {
+  connected: boolean;
+  /** The statement the creator agrees to before connecting. */
+  authorization: string;
+  your_address: string;
+  account: {
+    id: string;
+    backend: string;
+    key_fingerprint: string;
+    birthday: number;
+    network: string;
+    authorized_at: string;
+    simulated: boolean;
+  } | null;
+}
+
+/** Proof that an invoice was paid and confirmed on chain, for the payer and the recipient. */
+export interface Receipt {
   id: string;
-  kind: "fixed" | "performance" | "refund" | "link_forward";
-  to_address: string;
+  invoice_id: string;
+  purpose: InvoicePurpose;
+  title: string;
+  payer_id: string;
+  recipient_id: string;
   amount: string;
+  received: string;
+  network: string;
+  pools: string[];
+  txids: string[];
+  confirmations: number;
+  mined_height: number | null;
   memo: string;
-  beneficiary_id: string;
   campaign_id: string | null;
   deal_id: string | null;
-  invoice_id: string | null;
-  reason: string;
-  evidence_hash?: string;
-  status: PayoutStatus;
-  approvals: { by: string; approved: boolean; note: string; at: string }[];
-  operation_id: string | null;
-  txid: string | null;
-  confirmations: number;
-  error: string;
-  attempts: number;
+  milestone_id: string | null;
   simulated: boolean;
-  created_at: string;
-  updated_at: string;
+  issued_at: string;
+  receipt_hash: string;
+  explorer_urls: string[];
+}
+
+/** GET /api/admin/scanner (operators, read-only). */
+export interface ScannerStatus {
+  scanner: {
+    backend: string;
+    network: string;
+    simulated: boolean;
+    reachable: boolean;
+    server: string;
+    chain_name: string;
+    tip_height: number | null;
+    nu7_activation_height: number | null;
+    nu7_active: boolean | null;
+    detail: string;
+    warnings: string[];
+  };
+  receiving_accounts: number;
+  open_invoices: number;
+  custody: string;
 }
 
 export interface WalletStatus {
-  backend: string;
+  backend: string; // the view-only scanner
   network: string;
   simulated: boolean;
   reachable: boolean;
+  tip_height: number | null;
+  nu7_activation_height: number | null;
+  nu7_active: boolean | null;
+  warnings: string[];
   detail: string;
+  faucet_url: string | null;
   your_address: string;
-  escrow_balance?: string | null;
+  receiving_account_connected: boolean;
+  /** What the scanner confirmed arriving in your wallet through Zerveil invoices. Not a wallet balance. */
+  confirmed_received_via_zerveil: string;
+  custody: string;
 }
 
 export interface SpendingPolicy {
@@ -357,15 +439,6 @@ export interface AgentPremiumSearch {
   results?: PremiumResult[];
 }
 
-export interface Custody {
-  wallet: { backend: string; network: string; simulated: boolean; reachable: boolean; escrow_balance: string | null; detail: string; warnings: string[] };
-  received_total: string;
-  paid_out_total: string;
-  queued_payouts_total: string;
-  expected_balance_before_fees: string;
-  note: string;
-}
-
 export type DealState =
   | "NEGOTIATING"
   | "REJECTED"
@@ -373,17 +446,17 @@ export type DealState =
   | "AGREED"
   | "AWAITING_APPROVAL"
   | "BLOCKED"
-  | "AWAITING_FUNDING"
-  | "FUNDING"
-  | "FUNDED"
+  | "PAYMENT_REQUESTED"
+  | "PAYMENT_PENDING"
   | "PAYMENT_EXPIRED"
+  | "CONTENT_CREATION"
   | "PROOF_SUBMITTED"
   | "PROOF_REJECTED"
   | "VERIFIED"
-  | "FIXED_RELEASED"
+  | "PERFORMANCE_DUE"
   | "DISPUTED"
   | "COMPLETED"
-  | "EXPIRED_REFUNDED"
+  | "UNDELIVERED"
   | "ARCHIVED";
 
 export interface Offer {
@@ -505,8 +578,8 @@ export interface Proof {
   content: ContentReport | null;
 }
 
-/** A payout decided for a deal by deterministic code; its delivery status lives in the PayoutRequest. */
-export interface Payout {
+/** A payment made by a removed payment flow (before direct payments). Read-only history of archived deals. */
+export interface LegacyPayout {
   payout_id: string;
   kind: "fixed" | "performance" | "refund";
   to: string;
@@ -515,6 +588,25 @@ export interface Payout {
   views: number | null;
   evidence_hash: string;
   simulated: boolean;
+  legacy_tx_hash?: string;
+}
+
+export type MilestoneStatus = "scheduled" | "requested" | "pending" | "confirmed" | "expired" | "waived";
+
+/** One payment of a deal, requested as its own invoice and paid by the advertiser directly to the creator's wallet. */
+export interface Milestone {
+  id: string;
+  kind: "fixed" | "performance";
+  amount: string;
+  status: MilestoneStatus;
+  invoice_id: string | null;
+  receipt_id: string | null;
+  due_at: string | null;
+  requested_at: string | null;
+  confirmed_at: string | null;
+  views: number | null;
+  evidence?: Record<string, unknown>;
+  evidence_hash: string;
 }
 
 export interface Deal {
@@ -528,20 +620,19 @@ export interface Deal {
   approved_terms_hash: string | null;
   approvals: Approval[];
   agreed_at: string | null;
-  funding_invoice_id: string | null;
-  funded_at: string | null;
-  funding_simulated: boolean;
+  milestones: Milestone[];
+  /** The milestone payments were confirmed by the simulated scanner: no ZEC moved. */
+  payment_simulated: boolean;
   proof: Proof | null;
   proof_history: Proof[];
-  payouts: Payout[];
+  /** Legacy, read-only: payments made by an earlier payment flow (archived deals only). */
+  payouts: LegacyPayout[];
   archived_reason: string;
-  fixed_release_due: string | null;
   performance_due: string | null;
   policy_violations: string[];
   updated_at: string | null;
   /** Only on GET /api/deals/{id}. */
-  payout_requests?: PayoutRequest[];
-  funding_invoice?: PaymentRequest | null;
+  milestone_invoices?: MilestoneInvoice[];
 }
 
 export interface InfluencerDeal extends Deal {
@@ -605,10 +696,9 @@ export interface NegotiationProgress {
 }
 
 export interface LiveEvent {
-  type: "audit" | "deal" | "campaign" | "negotiation" | "negotiation_progress" | "invoice" | "payout";
+  type: "audit" | "deal" | "campaign" | "negotiation" | "negotiation_progress" | "invoice";
   campaign_id?: string;
   invoice_id?: string;
-  payout_id?: string;
   deal_id?: string | null;
   kind?: string;
   state?: DealState;
@@ -648,7 +738,7 @@ export interface CampaignInput {
 export type Deliverable = "youtube_short" | "youtube_video";
 
 export interface Approval {
-  kind: "payment" | "compliance_review";
+  kind: "agreement" | "payment" | "compliance_review"; // "payment": EVM-era history only
   by: string;
   approved: boolean;
   terms_hash: string;
@@ -832,7 +922,8 @@ export interface ComplianceView {
     terms_hash: string;
     terms_hash_matches_approval: boolean;
     gates: string[];
-    funding_simulated: boolean;
+    payment_simulated: boolean;
+    milestones: Omit<Milestone, "evidence">[];
   }[];
 }
 

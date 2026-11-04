@@ -20,10 +20,10 @@ export function ProofReviewCard({ review, viewer }: { review: ProofReview; viewe
         {review.can_resubmit && review.resubmit_by ? (
           <p className="small">
             {viewer === "creator" ? "You can resubmit" : "The creator can resubmit"} until <strong>{when(review.resubmit_by)}</strong> ({left(review.resubmit_by)}).
-            Unpaid funds stay in escrow until then; after the deadline they are refunded.
+            After the deadline no performance fee is due.
           </p>
         ) : (
-          <p className="small">A resubmission cannot fix this before the deadline; the escrow refunds the advertiser when it passes.</p>
+          <p className="small">A resubmission cannot fix this before the deadline; when it passes the deal closes as undelivered and no performance fee is due.</p>
         )}
       </Notice>
       <ol className="issues">

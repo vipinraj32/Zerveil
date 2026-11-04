@@ -1,5 +1,6 @@
-// Public payment page (/pay/:id): anyone with the link can pay a shielded Zcash invoice. No sign-in required.
-// It polls the public invoice every 10 s until it is paid, expired or cancelled.
+// Public payment page (/pay/:id): anyone with the link can pay a shielded Zcash payment request, directly to the
+// recipient's own wallet. No sign-in required. It polls the public request every 10 s until it is confirmed, expired,
+// failed or cancelled. The status comes only from Zerveil's view-only scanner; a transaction id is never proof.
 
 import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
@@ -7,11 +8,11 @@ import { api } from "../api";
 import { Logo } from "../components/Logo";
 import { PrivacyNote, ShieldedCheckout } from "../components/Payments";
 import { Card, ErrorText, Notice, Spinner } from "../components/ui";
-import { PURPOSE_LABEL, when, zec } from "../format";
+import { PAID_INVOICE, PURPOSE_LABEL, confirmationProgress, when, zec } from "../format";
 import { useSession } from "../session";
 import type { PaymentRequest } from "../types";
 
-const FINAL = new Set(["paid", "expired", "cancelled", "late_payment"]);
+const FINAL = new Set(["confirmed", "overpaid", "expired", "failed", "cancelled"]);
 
 export function PublicPay() {
   const { id = "" } = useParams();
@@ -40,6 +41,7 @@ export function PublicPay() {
   }, [done, load]);
 
   const testnet = (status?.zcash.network ?? "testnet") !== "mainnet";
+  const notice = status?.zcash.testnet_notice;
 
   return (
     <div className="paypage">
@@ -48,12 +50,17 @@ export function PublicPay() {
           <Logo size={30} />
         </Link>
         <div className="row">
-          {testnet && <span className="testnet-chip">Zcash {status?.zcash.network ?? "testnet"} · {status?.zcash.ticker ?? "TAZ"} has no value</span>}
-          {status?.payments_simulated && <span className="testnet-chip warn">Simulated payments: no ZEC moves</span>}
+          {notice && <span className="testnet-chip">{notice}</span>}
+          {status?.payments_simulated && <span className="testnet-chip warn">Simulated — no ZEC moved</span>}
         </div>
       </header>
 
       <main className="paypage-main">
+        {notice && (
+          <div className="testnet-banner" role="note">
+            {notice}
+          </div>
+        )}
         {error && !invoice ? (
           <Card title="Payment not found">
             <ErrorText error={error} />
@@ -70,17 +77,35 @@ export function PublicPay() {
               </p>
               <h1>{invoice.title || "Shielded payment"}</h1>
               {invoice.description && <p>{invoice.description}</p>}
+              <p className="muted small">
+                Paid directly to {invoice.payee_name ? `${invoice.payee_name}'s` : "the recipient's"} own wallet. Zerveil never holds this money; it only
+                confirms the payment arrived.
+              </p>
             </Card>
 
-            {invoice.status === "paid" && (
+            {PAID_INVOICE.has(invoice.status) && (
               <Notice tone="good">
-                Paid{invoice.paid_at ? ` on ${when(invoice.paid_at)}` : ""}: {zec(invoice.received || invoice.amount)} received with {invoice.confirmations}{" "}
-                confirmations. Thank you.
+                Confirmed{invoice.paid_at ? ` on ${when(invoice.paid_at)}` : ""}: {zec(invoice.received || invoice.amount)} arrived in the recipient's wallet with{" "}
+                {invoice.confirmations} confirmations.
+                {invoice.status === "overpaid" && " More than the requested amount arrived; settle the difference with the recipient."} Thank you.
+                {invoice.simulated && " (Simulated — no ZEC moved.)"}
+              </Notice>
+            )}
+            {(invoice.status === "seen" || invoice.status === "mined" || invoice.status === "confirming") && (
+              <Notice tone="info">
+                {invoice.status === "seen" ? "Payment seen, not yet mined." : "Payment mined."} {confirmationProgress(invoice)}. No need to send again.
+              </Notice>
+            )}
+            {invoice.status === "underpaid" && (
+              <Notice tone="warn">
+                Only {zec(invoice.received)} of {zec(invoice.amount)} arrived. Send the rest with the same memo before the request expires.
               </Notice>
             )}
             {invoice.status === "expired" && <Notice tone="warn">This payment request expired. Ask for a new link; do not send to this address.</Notice>}
+            {invoice.status === "failed" && (
+              <Notice tone="bad">The payment did not confirm (for example, the transaction expired unmined). Ask the recipient for a new request.</Notice>
+            )}
             {invoice.status === "cancelled" && <Notice tone="warn">This payment request was cancelled. Do not send to this address.</Notice>}
-            {invoice.status === "late_payment" && <Notice tone="warn">A payment arrived after expiry. The recipient will be in touch about it.</Notice>}
 
             <Card>
               <ShieldedCheckout invoice={invoice} onChange={load} showPayLink={false} />
@@ -92,13 +117,16 @@ export function PublicPay() {
               <ol className="small paypage-steps">
                 <li>Open a Zcash wallet that supports shielded Unified Addresses ({testnet ? "on testnet" : "mainnet"}).</li>
                 <li>Use "Open in wallet", or copy the address, the exact amount and the memo.</li>
-                <li>Send. The status changes to Confirming when the payment is seen, then Paid after enough confirmations.</li>
+                <li>
+                  Send. The status moves from Payment seen to Mined and Confirming, then Confirmed after {invoice.required_confirmations} confirmations.
+                </li>
               </ol>
             </Card>
 
             <Card title="Privacy">
               <p className="small">
-                Shielded: amount, sender and memo are encrypted on-chain; Zerveil sees the payment only because it holds the escrow wallet's viewing key.
+                Shielded: amount, sender and memo are encrypted on-chain. The address belongs to the recipient's own wallet; Zerveil sees the payment only
+                through a viewing key the recipient connected, which cannot spend.
               </p>
               <PrivacyNote />
             </Card>

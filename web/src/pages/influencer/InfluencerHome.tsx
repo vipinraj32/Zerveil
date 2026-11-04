@@ -1,7 +1,7 @@
 import { Link } from "react-router";
 import { api } from "../../api";
 import { Avatar, Card, Empty, ErrorText, Notice, Spinner, Stat } from "../../components/ui";
-import { IN_ESCROW, NEEDS_PROOF } from "../../creatorDeals";
+import { NEEDS_PROOF, awaitingFor, receivedFor } from "../../creatorDeals";
 import { humanize, num, zec } from "../../format";
 import { useLiveEvents, useResource } from "../../live";
 import { useMe } from "../../session";
@@ -23,10 +23,8 @@ export function InfluencerHome() {
   );
 
   const list = deals.data ?? [];
-  const earned = list.flatMap((d) => d.payouts).filter((p) => p.kind !== "refund").reduce((s, p) => s + Number(p.amount), 0);
-  const locked = list
-    .filter((d) => IN_ESCROW.has(d.state) && d.terms)
-    .reduce((s, d) => s + Number(d.terms!.cap) - d.payouts.filter((p) => p.kind !== "refund").reduce((a, p) => a + Number(p.amount), 0), 0);
+  const earned = list.reduce((s, d) => s + receivedFor(d), 0);
+  const requested = list.reduce((s, d) => s + awaitingFor(d), 0);
   const todo = list.filter((d) => NEEDS_PROOF.has(d.state));
 
   return (
@@ -49,8 +47,15 @@ export function InfluencerHome() {
 
       {todo.length > 0 && (
         <Notice tone="warn">
-          {todo.length === 1 ? "1 deal is" : `${todo.length} deals are`} funded and waiting for your video.{" "}
+          {todo.length === 1 ? "1 deal is" : `${todo.length} deals are`} paid and waiting for your video.{" "}
           <Link to="/influencer/deals?status=accepted">Open them</Link>
+        </Notice>
+      )}
+
+      {!user.receiving_account_id && (
+        <Notice tone="warn">
+          Connect a viewing key of your receiving account so payments to your wallet can be confirmed. You are not listed for new deals until you do.{" "}
+          <Link to="/influencer/payments">Connect it</Link>
         </Notice>
       )}
 
@@ -61,8 +66,8 @@ export function InfluencerHome() {
       )}
 
       <div className="stats">
-        <Stat label="Earned" value={zec(earned)} />
-        <Stat label="Waiting in escrow for you" value={zec(locked)} hint="Up to this much, depending on views" />
+        <Stat label="Confirmed in your wallet" value={zec(earned)} hint="Milestone payments the scanner confirmed. Not your wallet balance." />
+        <Stat label="Requested from brands" value={zec(requested)} hint="Payment requests to your wallet not yet confirmed" />
         <Stat label="Deals" value={list.length} />
         <Stat label="Need your video" value={todo.length} />
       </div>
@@ -93,7 +98,7 @@ export function InfluencerHome() {
         </Card>
 
         <Card title="Agent inbox (A2A)">
-          <p className="muted small">Settlement notices your agent received from advertiser agents.</p>
+          <p className="muted small">Payment notices your agent received from advertiser agents.</p>
           {!inbox.data?.length ? (
             <Empty>Nothing yet.</Empty>
           ) : (
@@ -101,7 +106,6 @@ export function InfluencerHome() {
               {inbox.data.map((m, i) => (
                 <li key={i}>
                   <strong>{humanize(String(m.type))}</strong> · <span className="mono">{String(m.deal_id)}</span>
-                  {m.amount_locked !== undefined && <> · {zec(String(m.amount_locked))} locked</>}
                   {m.amount !== undefined && (
                     <>
                       {" "}

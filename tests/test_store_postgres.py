@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 
 from zerveil.models import AuditEvent, Campaign, ChannelInfo, Deal, DealState, User, new_id
-from zerveil.payments.models import CreditEntry, Invoice, PayoutRequest
+from zerveil.payments.models import CreditEntry, Invoice, Receipt, ReceivingAccount
 from zerveil.store import MemoryStore, PostgresStore
 from zerveil.store.migrations import MIGRATIONS, migration_status
 
@@ -33,11 +33,11 @@ async def test_roundtrip(store, campaign, terms):
     await store.save_campaign(Campaign(spec=campaign, created_at=datetime.now(UTC)))
     deal = Deal(id=new_id("DEAL"), campaign_id=campaign.id, influencer_id="ava-fit", terms=terms)
     await store.save_deal(deal)
-    deal.state = DealState.FUNDED
+    deal.state = DealState.CONTENT_CREATION
     await store.save_deal(deal)
 
     got = await store.get_deal(deal.id)
-    assert got is not None and got.state == DealState.FUNDED and got.terms.terms_hash() == terms.terms_hash()
+    assert got is not None and got.state == DealState.CONTENT_CREATION and got.terms.terms_hash() == terms.terms_hash()
     assert [d.id for d in await store.list_deals(campaign.id)] == [deal.id]
     assert (await store.get_campaign(campaign.id)).spec.budget == campaign.budget
 
@@ -165,7 +165,6 @@ async def test_negotiation_sessions_queue_once_and_compare_and_set(store):
 
 
 async def test_payment_tables(store):
-    import asyncio
     from datetime import timedelta
     from decimal import Decimal
 
@@ -176,20 +175,27 @@ async def test_payment_tables(store):
     await store.save_invoice(inv)
     got = await store.get_invoice(inv.id)
     assert got is not None and got.amount == Decimal("0.12345678") and got.address == inv.address
-    assert inv.id in {i.id for i in await store.list_invoices(owner_id=owner, status={"pending"})}
+    assert inv.id in {i.id for i in await store.list_invoices(owner_id=owner, status={"awaiting_payment"})}
     # one address per invoice: a second invoice cannot reuse it
     with pytest.raises(Exception):  # noqa: B017 - ValueError in memory, UniqueViolation in PostgreSQL
         await store.save_invoice(inv.model_copy(update={"id": new_id("PAY")}))
 
-    po = PayoutRequest(id=new_id("PO"), kind="refund", to_address=ua("refund"), amount=Decimal("1.5"), memo="ZRV1:PO-x", reason="test",
-                       beneficiary_id=owner, created_at=now)  # fmt: skip
-    assert await store.save_payout(po)
-    # compare-and-set: of two workers moving approved → sending, exactly one wins
-    po.status = "approved"
-    assert await store.save_payout(po, expect_status="pending_approval")
-    racers = [po.model_copy(update={"status": "sending"}) for _ in range(5)]
-    wins = await asyncio.gather(*(store.save_payout(r, expect_status="approved") for r in racers))
-    assert sum(wins) == 1 and (await store.get_payout(po.id)).status == "sending"
+    # receiving accounts: the latest connection per owner; revocation is kept as history
+    old = ReceivingAccount(id=new_id("RA"), owner_id=owner, role="creator", backend="simulated", scanner_account="a1", key_fingerprint="f" * 16,
+                           birthday=1, network="testnet", authorization="ok", authorized_at=now - timedelta(minutes=5))  # fmt: skip
+    await store.save_receiving_account(old)
+    old.revoked_at = now
+    await store.save_receiving_account(old)
+    new = old.model_copy(update={"id": new_id("RA"), "scanner_account": "a2", "authorized_at": now, "revoked_at": None})
+    await store.save_receiving_account(new)
+    assert (await store.get_receiving_account(owner)).id == new.id and (await store.get_receiving_account_by_id(old.id)).revoked_at
+    # receipts: visible to payer and recipient
+    receipt = Receipt(id=new_id("RCPT"), invoice_id=inv.id, purpose="credit_topup", title="t", payer_id=owner, recipient_id="api-seller",
+                      amount=Decimal("1"), received=Decimal("1"), network="zcash-testnet", pools=["ironwood"], txids=["ab" * 32],
+                      confirmations=3, memo="ZRV1:PAY-x", issued_at=now)  # fmt: skip
+    await store.save_receipt(receipt)
+    assert (await store.get_receipt(receipt.id)).txids == ["ab" * 32]
+    assert [r.id for r in await store.list_receipts(owner)] == [receipt.id] and await store.list_receipts("nobody") == []
 
     entry = CreditEntry(id=new_id("CR"), user_id=owner, amount=Decimal("0.5"), kind="topup", ref=inv.id, at=now)
     assert await store.add_credit(entry)

@@ -1,4 +1,8 @@
-"""Payment records. Amounts are Decimal ZEC (TAZ on testnet), serialized as strings."""
+"""Payment records. Amounts are Decimal ZEC (TAZ on testnet), serialized as strings.
+
+Zerveil holds no funds. An invoice asks a payer to send ZEC straight to a fresh address of the recipient's own
+wallet account; the view-only scanner reports what arrived there, and that is the only evidence of payment.
+"""
 
 from __future__ import annotations
 
@@ -8,15 +12,21 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-InvoicePurpose = Literal["campaign_funding", "api_access", "credit_topup", "payment_link"]
-InvoiceStatus = Literal["pending", "underpaid", "confirming", "paid", "expired", "late_payment", "cancelled"]
-OPEN_INVOICE: frozenset[str] = frozenset({"pending", "underpaid", "confirming"})
+InvoicePurpose = Literal["milestone", "api_access", "credit_topup", "payment_link"]
+InvoiceStatus = Literal["awaiting_payment", "seen", "mined", "confirming", "confirmed", "underpaid", "overpaid", "expired", "failed",
+                        "cancelled"]  # fmt: skip
+# Still watched by the scanner and payable
+OPEN_INVOICE: frozenset[str] = frozenset({"awaiting_payment", "seen", "mined", "confirming", "underpaid"})
+# Paid in full with enough confirmations
+PAID_INVOICE: frozenset[str] = frozenset({"confirmed", "overpaid"})
+# Escrow-era statuses as stored before migration 3
+_LEGACY_STATUS = {"pending": "awaiting_payment", "paid": "confirmed", "late_payment": "expired"}
 
 
 class InvoiceNote(BaseModel):
-    """A shielded output the wallet's scanner found on the invoice's address. Each note is bound to one invoice."""
+    """A shielded output the scanner found for this invoice. Each note is bound to one invoice."""
 
     key: str  # txid:pool:output_index
     txid: str
@@ -24,40 +34,59 @@ class InvoiceNote(BaseModel):
     output_index: int
     amount: Decimal
     confirmations: int
+    mined_height: int | None = None
+    expired: bool = False
     memo_matched: bool  # the decrypted memo carried this invoice's reference
     first_seen_at: datetime
 
 
 class Invoice(BaseModel):
-    """A request to pay `amount` to a one-time shielded Unified Address of the escrow wallet.
-
-    Paid only from wallet scan data: enough value received on `address` with `required_confirmations`.
-    A transaction id typed by a user is never evidence."""
+    """A request to pay `amount` directly to `address`, a one-time shielded Unified Address of the recipient's own
+    wallet account. Confirmed only from scanner data: enough value received with `required_confirmations`. A
+    transaction id typed by a user is never evidence."""
 
     id: str  # PAY-…
     purpose: InvoicePurpose
-    owner_id: str  # campaign_funding / api_access / credit_topup: who pays; payment_link: the creator who is paid
+    owner_id: str  # milestone / api_access / credit_topup: who pays; payment_link: the creator who is paid
+    recipient_id: str = ""  # whose wallet receives the money (a creator's user id, or "api-seller")
+    receiving_account_id: str = ""  # the ReceivingAccount the address belongs to
     title: str  # shown on the public payment page: no campaign terms
     description: str = ""
     amount: Decimal
     network: str
     address: str
     memo: str  # ZRV1:<id>, the only thing Zerveil asks the payer to put in the encrypted memo
-    status: InvoiceStatus = "pending"
+    status: InvoiceStatus = "awaiting_payment"
     received: Decimal = Decimal("0")
     confirmations: int = 0  # of the least-confirmed note counted
     required_confirmations: int = 3
     notes: list[InvoiceNote] = Field(default_factory=list)
     campaign_id: str | None = None
     deal_ids: list[str] = Field(default_factory=list)
+    milestone_id: str | None = None
     scope: str = ""  # api_access: the operation it unlocks, e.g. "premium_search:fitness"
     consumed_at: datetime | None = None  # api_access: used once to unlock the operation
     paid_via: Literal["", "shielded", "agent_credit"] = ""
+    receipt_id: str | None = None
     simulated: bool = False
     created_at: datetime
     expires_at: datetime
     paid_at: datetime | None = None
     updated_at: datetime | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_status(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if data.get("status") in _LEGACY_STATUS:
+                data = {**data, "status": _LEGACY_STATUS[data["status"]]}
+            if data.get("purpose") == "campaign_funding":  # escrow funding invoices: history only
+                data = {**data, "purpose": "milestone"}
+        return data
+
+    @property
+    def is_paid(self) -> bool:
+        return self.status in PAID_INVOICE
 
     def public(self) -> dict[str, Any]:
         """What anyone with the payment link sees: no transaction ids, no campaign or deal references."""
@@ -66,52 +95,63 @@ class Invoice(BaseModel):
                                                      "expires_at", "paid_at"})  # fmt: skip
 
 
-PayoutKind = Literal["fixed", "performance", "refund", "link_forward"]
-PayoutStatus = Literal["pending_approval", "approved", "sending", "submitted", "sent", "confirmed", "failed", "rejected", "unknown"]
+class ReceivingAccount(BaseModel):
+    """A wallet account whose incoming payments Zerveil may watch, connected by its owner with a viewing key.
+
+    The viewing key itself is not stored here: only the scanner's account reference and a fingerprint. A viewing
+    key cannot spend; it does let the scanner see this account's transactions (see PRIVACY.md)."""
+
+    id: str  # RA-…
+    owner_id: str  # user id, or "api-seller"
+    role: Literal["creator", "api_seller"]
+    label: str = ""
+    backend: str
+    scanner_account: str  # the scanner's account reference (zcash-devtool account UUID)
+    key_fingerprint: str  # sha256 of the viewing key, first 16 hex characters
+    birthday: int  # block height the scanner starts from
+    network: str
+    authorization: str  # the statement the owner agreed to when connecting
+    authorized_at: datetime
+    revoked_at: datetime | None = None
+    simulated: bool = False
+
+    @property
+    def active(self) -> bool:
+        return self.revoked_at is None
 
 
-class PayoutApproval(BaseModel):
-    by: str
-    approved: bool
-    note: str = ""
-    at: datetime
+class Receipt(BaseModel):
+    """Proof, for the payer and the recipient, that an invoice was paid and confirmed on chain. Holds no addresses;
+    `receipt_hash` lets either party show a third party exactly what they were given."""
 
-
-class PayoutRequest(BaseModel):
-    """A shielded payment out of the escrow account, decided by deterministic code and (by default) approved by an
-    operator before the wallet sends it. Status moves forward only; `unknown` means a send may or may not have
-    happened and is reconciled from the wallet's outgoing memos, never resent automatically."""
-
-    id: str  # PO-…
-    kind: PayoutKind
-    to_address: str
+    id: str  # RCPT-…
+    invoice_id: str
+    purpose: InvoicePurpose
+    title: str
+    payer_id: str
+    recipient_id: str
     amount: Decimal
-    memo: str  # ZRV1:<id>
-    beneficiary_id: str = ""  # the user being paid
+    received: Decimal
+    network: str
+    pools: list[str]
+    txids: list[str]
+    confirmations: int
+    mined_height: int | None = None
+    memo: str
     campaign_id: str | None = None
     deal_id: str | None = None
-    invoice_id: str | None = None
-    reason: str
-    evidence: dict[str, Any] = Field(default_factory=dict)
-    evidence_hash: str = ""
-    status: PayoutStatus = "pending_approval"
-    approvals: list[PayoutApproval] = Field(default_factory=list)
-    operation_id: str = ""
-    txid: str = ""
-    confirmations: int = 0
-    error: str = ""
-    attempts: int = 0
+    milestone_id: str | None = None
     simulated: bool = False
-    created_at: datetime
-    updated_at: datetime | None = None
+    issued_at: datetime
+    receipt_hash: str = ""
 
-
-def evidence_hash(evidence: dict[str, Any]) -> str:
-    return hashlib.sha256(json.dumps(evidence, sort_keys=True, default=str).encode()).hexdigest()
+    def compute_hash(self) -> str:
+        body = self.model_dump(mode="json", exclude={"receipt_hash", "confirmations"})
+        return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
 
 
 class SpendingPolicy(BaseModel):
-    """Limits on what the advertiser's AI agent may pay on its own, from the advertiser's prepaid agent credit."""
+    """Limits on what the advertiser's AI agent may pay on its own, from the advertiser's prepaid API credit."""
 
     enabled: bool = True
     max_per_request: Decimal = Field(default=Decimal("0.1"), ge=0)
@@ -122,7 +162,8 @@ class SpendingPolicy(BaseModel):
 
 
 class CreditEntry(BaseModel):
-    """Prepaid agent credit. Top-ups come only from paid credit_topup invoices; spends only through the spending policy."""
+    """Prepaid API credit with the API seller. Top-ups come only from confirmed credit_topup invoices paid to the
+    seller's wallet; spends only through the spending policy. It is a prepayment for API calls, not a deposit."""
 
     id: str
     user_id: str
@@ -149,10 +190,10 @@ class SpendRequest(BaseModel):
 
 
 class PaymentEvent(BaseModel):
-    """Payment verification audit trail (scanner findings, status changes, payout steps)."""
+    """Payment verification audit trail (scanner findings, status changes, receipts)."""
 
     at: datetime
     invoice_id: str | None = None
-    payout_id: str | None = None
+    payout_id: str | None = None  # escrow-era history only
     kind: str
     detail: dict[str, Any] = Field(default_factory=dict)

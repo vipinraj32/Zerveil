@@ -56,10 +56,10 @@ export function RejectionDialog({ dealId, review, onFix }: { dealId: string; rev
       <p className="small">
         {review.can_resubmit && review.resubmit_by ? (
           <>
-            Resubmit by <strong>{when(review.resubmit_by)}</strong>. The money stays in escrow until then.
+            Resubmit by <strong>{when(review.resubmit_by)}</strong>. The performance fee is only requested for an accepted post.
           </>
         ) : (
-          "This can't be fixed before the deadline; the escrow refunds the brand when it passes."
+          "This can't be fixed before the deadline; when it passes the deal closes as undelivered and no performance fee is due."
         )}
       </p>
       <div className="row reject-actions">

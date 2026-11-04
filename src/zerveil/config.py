@@ -9,11 +9,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class PaymentMode(StrEnum):
-    # In-process wallet stand-in: invoices, scanning and payouts run end to end, every record is labeled simulated and
-    # no ZEC moves. For development and tests.
+    # In-process scanner stand-in: invoices and scanning run end to end, every record is labeled simulated and no
+    # ZEC moves. For development and tests.
     SIMULATED = "simulated"
-    # A real Zcash wallet (Zallet or a zcashd-compatible wallet RPC) on the configured network. Refuses to start
-    # without the wallet URL, escrow account and from-address; never falls back to simulation.
+    # A real view-only scanner (zcash-devtool + lightwalletd) on Zcash testnet. Refuses to start without its binary
+    # and wallet directory; never falls back to simulation.
     ZCASH = "zcash"
 
 
@@ -38,30 +38,29 @@ class Settings(BaseSettings):
     frontend_url: str = ""
     # Bearer token for the stdio MCP server (read-only operator view); empty disables it
     mcp_api_token: str = ""
-    # Accounts allowed to approve payouts and see the custody reconciliation (comma-separated Google emails)
+    # Operators: see payment events and scanner status (comma-separated Google emails). They cannot move funds.
     admin_emails: str = ""
 
-    # ---- Zcash payments -------------------------------------------------------------------------------------
+    # ---- Zcash payments (direct, no escrow) ------------------------------------------------------------------
+    # Zerveil never holds funds. Payers pay the recipient's own wallet; a view-only scanner confirms receipt using
+    # a viewing key the recipient connected.
     payment_mode: PaymentMode = Field(PaymentMode.SIMULATED, validation_alias=AliasChoices("payment_mode", "zcash_payment_mode"))
-    zcash_network: str = "testnet"  # testnet | mainnet | regtest; the MVP is built and documented for testnet only
-    # Wallet JSON-RPC (Zallet). Plain HTTP: keep it on loopback, an SSH tunnel or a private network.
-    zcash_wallet_rpc_url: str = Field("", validation_alias=AliasChoices("zcash_wallet_rpc_url", "zcash_wallet_backend_url"))
-    zcash_wallet_rpc_user: str = ""
-    zcash_wallet_rpc_password: str = Field("", validation_alias=AliasChoices("zcash_wallet_rpc_password", "zcash_wallet_auth_token"))
-    # The escrow account inside that wallet (account UUID for Zallet, or a zcashd account number) and one of its
-    # Unified Addresses, which z_sendmany spends from
-    zcash_escrow_account: str = Field("", validation_alias=AliasChoices("zcash_escrow_account", "escrow_wallet_reference"))
-    zcash_escrow_from_address: str = ""
-    zcash_receiver_types: str = "orchard,sapling"  # receivers in invoice addresses: shielded only
-    zcash_privacy_policy: str = "FullPrivacy"  # z_sendmany privacy policy for payouts
-    zcash_confirmation_threshold: int = 3  # confirmations before an invoice counts as paid
-    zcash_send_minconf: int = 3  # minimum confirmations of the notes a payout spends
-    zcash_invoice_ttl_minutes: int = 120  # funding and top-up invoices
-    zcash_fee_reserve_per_deal: Decimal = Decimal("0.0003")  # ZIP-317 fees for up to three payouts per deal
+    zcash_network: str = "testnet"  # testnet | mainnet | regtest; built and documented for testnet only
+    zcash_testnet_enabled: bool = True  # must stay true: PAYMENT_MODE=zcash refuses mainnet in this MVP
+    zcash_wallet_backend: str = "zcash-devtool"  # the only real scanner backend (see README, "Wallet selection")
+    zcash_lightwalletd_url: str = "https://testnet.zec.rocks:443"
+    zcash_devtool_bin: str = "zcash-devtool"  # path to the zcash-devtool binary
+    zcash_devtool_wallet_dir: str = ""  # view-only wallet directory (holds imported viewing keys; keep it private)
+    zcash_scanner_timeout_seconds: float = 900  # one sync can take long right after a viewing key is imported
+    zcash_payment_scanner_enabled: bool = True  # the scheduler scans watched accounts for payments
+    zcash_receiver_types: str = "orchard,sapling"  # receivers in invoice addresses: shielded only (orchard -> Ironwood under NU7)
+    zcash_confirmation_threshold: int = 3  # confirmations before a payment counts as confirmed
+    zcash_invoice_ttl_minutes: int = 1440  # campaign milestone invoices
     zcash_explorer_tx_url: str = ""  # e.g. https://testnet.zcashexplorer.app/transactions/{txid}; empty = no links
-    # Payouts wait for an operator's approval before the wallet sends them (recommended; see PRIVACY.md)
-    payout_approval_required: bool = True
-    payout_reconcile_after_minutes: int = 10  # a send whose result was lost is looked up in the wallet after this
+    zcash_faucet_url: str = "https://zcash-faucet.vercel.app/"
+    # The API seller's receiving account (HTTP 402 premium search and agent-credit top-ups are paid to it)
+    zcash_api_seller_ufvk: str = ""
+    zcash_api_seller_birthday: int = 0
 
     # HTTP 402: price of one premium API call, and how long its invoice stays payable
     premium_search_price: Decimal = Decimal("0.05")
@@ -81,6 +80,8 @@ class Settings(BaseSettings):
     def _known_mode(cls, v: object) -> object:
         if isinstance(v, str) and v.lower() in ("hosted", "sepolia"):
             raise ValueError(f"PAYMENT_MODE={v} was removed with the HSP/EVM payment flow: use simulated or zcash")
+        if isinstance(v, str) and v.lower() == "escrow":
+            raise ValueError("the escrow wallet was removed: payments go directly to the recipient's wallet; use simulated or zcash")
         return v
 
     @property

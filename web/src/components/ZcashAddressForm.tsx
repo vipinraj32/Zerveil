@@ -3,7 +3,7 @@ import { api } from "../api";
 import { useMe, useSession } from "../session";
 import { ErrorText } from "./ui";
 
-/** Save the user's shielded Unified Address: the creator's payout address or the advertiser's refund address.
+/** Save the user's own shielded Unified Address (from their own wallet). Creators name it as payee in signed terms.
  * The backend validates it (UA on the right network only: no transparent t-addresses, no Sapling-only addresses). */
 export function ZcashAddressForm({ onSaved, submitLabel }: { onSaved?: () => void; submitLabel?: string }) {
   const { user } = useMe();
@@ -36,8 +36,8 @@ export function ZcashAddressForm({ onSaved, submitLabel }: { onSaved?: () => voi
     <form className="form" onSubmit={submit}>
       <p className="small">
         {creator
-          ? "Your payouts are sent to this shielded address. Saving it also authorizes your creator agent's signing key to sign deal terms for you."
-          : "Unused campaign funds are refunded to this shielded address. You need one before you can create a campaign."}
+          ? "Your own wallet's shielded address, named as payee in the terms your agent signs. Payments go directly to your wallet; saving it also authorizes your creator agent's signing key to sign deal terms for you."
+          : "Your own wallet's shielded address (optional). You pay creators directly from your own wallet; Zerveil never holds funds."}
       </p>
       <label>
         Shielded Unified Address ({network})
@@ -62,8 +62,8 @@ export function ZcashAddressForm({ onSaved, submitLabel }: { onSaved?: () => voi
       </div>
       <ErrorText error={error} />
       <p className="muted small">
-        Privacy: your address is never listed in the directory or shown to the other party. Only you and the Zerveil operator, who sends payouts and
-        refunds from the escrow wallet, can see it.
+        Privacy: your address is never listed in the directory or shown to the other party. Only you and the Zerveil operator can see it. Zerveil
+        never holds or sends funds.
       </p>
     </form>
   );

@@ -14,7 +14,7 @@ const EASE = [0.2, 0.7, 0.2, 1] as const;
 const NAV = [
   { href: "#product", label: "Product" },
   { href: "#how", label: "How It Works" },
-  { href: "#payouts", label: "Payouts" },
+  { href: "#pay-math", label: "Payments" },
   { href: "#creators", label: "For Creators" },
   { href: "#faq", label: "FAQ" },
 ];
@@ -123,10 +123,10 @@ function Header({ direction, signedIn, advertiserStart, influencerStart }: { dir
 }
 
 const SLIDES: { img?: string; icon?: string; lines?: string[]; alt: string; eyebrow: string; title: string; text: string; link: string }[] = [
-  { icon: "shield", lines: ["Shielded funding invoice", "Fresh Unified Address", "Memo-matched payment"], alt: "Shielded Zcash payment flow", eyebrow: "Zcash testnet · open source", title: "Private payments for agent-made deals", text: "Agents agree the terms; shielded Zcash funds the escrow wallet and pays the creator.", link: "#how" },
+  { icon: "shield", lines: ["Shielded payment request", "Fresh address of the creator's wallet", "Memo-matched payment"], alt: "Shielded Zcash payment flow", eyebrow: "Zcash testnet · open source", title: "Private payments for agent-made deals", text: "Agents agree the terms; the advertiser pays the creator's own wallet directly in shielded Zcash.", link: "#how" },
   { icon: "agents", lines: ["Offer · round 1", "Counter · round 1", "Accept · inside your limits"], alt: "Agents exchanging offers over A2A", eyebrow: "Agent negotiation", title: "Your agent talks to every creator’s agent", text: "Offers go out in parallel. Your limits decide every reply.", link: "#negotiate" },
-  { img: "hero-proof.webp", alt: "Content agent report on brand mentions and logo visibility, sample data", eyebrow: "Content agent", title: "Every video is checked before payout", text: "Mentions, tags and length are checked against your brief.", link: "#verify" },
-  { icon: "key", lines: ["Fixed fee · after verified proof", "Performance fee · day 7", "Remainder · refunded"], alt: "Operator-approved shielded payouts", eyebrow: "Escrow wallet · testnet", title: "Payouts only after proof and approval", text: "Fixed fee first, performance fee later, the rest refunded — each payout approved by an operator.", link: "#payouts" },
+  { img: "hero-proof.webp", alt: "Content agent report on brand mentions and logo visibility, sample data", eyebrow: "Content agent", title: "Every video is checked before the performance fee", text: "Mentions, tags and length are checked against your brief.", link: "#verify" },
+  { icon: "key", lines: ["Fixed fee · when you accept", "Performance fee · day 7, from verified views", "Wallet to wallet · Zerveil holds nothing"], alt: "Direct shielded payments to creators", eyebrow: "Direct payments · testnet", title: "Wallet to wallet, confirmed on chain", text: "Fixed fee when you accept, performance fee from verified views at day 7 — each paid directly to the creator's wallet.", link: "#pay-math" },
 ];
 
 const SLIDE_MS = 6000;
@@ -203,11 +203,11 @@ function HeroCarousel() {
 }
 
 const STEPS = [
-  { icon: "key", title: "Set your limits", detail: "Budget, max fee, max CPM, spending limits and the checks a video must pass.", points: ["Budget reserved up front", "Fee and CPM ceilings", "Content checks"] },
+  { icon: "key", title: "Set your limits", detail: "Budget, max fee, max CPM, spending limits and the checks a video must pass.", points: ["Budget as a spending limit", "Fee and CPM ceilings", "Content checks"] },
   { icon: "agents", title: "Agents negotiate", detail: "Your agent sends offers to creator agents over A2A. Deterministic rules decide every reply.", points: ["Parallel offers", "Round limits", "Floors stay private"] },
   { icon: "check", title: "Policy checks", detail: "Agreed terms are re-checked by code, then you approve the deals together.", points: ["Hard limits in code", "One approval per campaign", "The LLM never pays"] },
-  { icon: "shield", title: "Shielded funding", detail: "Approval creates one shielded Zcash invoice. Pay it from any wallet to a fresh Unified Address.", points: ["Amount and memo encrypted", "Confirmations required", "Backend-managed escrow wallet"] },
-  { icon: "eye", title: "Proof, then payouts", detail: "The post is verified; an operator approves each shielded payout; the rest is refunded.", points: ["YouTube checks", "Operator-approved payouts", "Unused budget refunded"] },
+  { icon: "shield", title: "Pay creators directly", detail: "Accepting requests each creator's fixed fee as a shielded payment to a fresh address of their own wallet. Pay from any wallet, one by one or all at once.", points: ["Amount and memo encrypted", "Confirmations required", "Zerveil holds no funds"] },
+  { icon: "eye", title: "Proof, then performance", detail: "The post is verified; at day 7 the performance fee is computed from verified views and requested the same way.", points: ["YouTube checks", "View-only payment scanner", "Receipts for both sides"] },
 ];
 
 function Steps() {
@@ -303,13 +303,13 @@ function Steps() {
 }
 
 /** Same formula as agent_policy/pricing.py (hybrid): fixed + min(cap − fixed, views/1000 × CPM), rounded down to 0.01. */
-function payout(fixedAmt: number, cpmAmt: number, capAmt: number, views: number) {
+function dealPay(fixedAmt: number, cpmAmt: number, capAmt: number, views: number) {
   const cents = (v: number) => Math.round(v * 100);
   const cap = cents(capAmt);
   const fixed = Math.min(cents(fixedAmt), cap);
   const variable = Math.floor((views * cents(cpmAmt)) / 1000);
   const performance = Math.max(0, Math.min(cap - fixed, variable));
-  return { fixed, performance, refund: cap - fixed - performance, cap, capped: variable > performance };
+  return { fixed, performance, unused: cap - fixed - performance, cap, capped: variable > performance };
 }
 
 const taz = (c: number) => `${(c / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} TAZ`;
@@ -329,22 +329,22 @@ function Range({ id, label, value, min, max, step, onChange, format }: RangeProp
   );
 }
 
-function PayoutCalculator() {
+function PaymentCalculator() {
   const [fixed, setFixed] = useState(19);
   const [cpm, setCpm] = useState(2.5);
   const [cap, setCap] = useState(40);
   const [views, setViews] = useState(8000);
   const reveal = useReveal();
-  const r = payout(fixed, cpm, cap, views);
+  const r = dealPay(fixed, cpm, cap, views);
   const w = (c: number) => `${r.cap ? (c / r.cap) * 100 : 0}%`;
 
   return (
-    <section className="lp-payouts" id="payouts" aria-labelledby="payouts-title">
+    <section className="lp-pay" id="pay-math" aria-labelledby="pay-math-title">
       <div className="lp-container">
-        <motion.div className="lp-payouts-head" {...reveal()}>
-          <p className="lp-eyebrow">Payout math</p>
-          <h2 id="payouts-title">See where the money goes</h2>
-          <p>Move the sliders to see how a deal pays out in shielded TAZ (testnet ZEC). The fixed fee is released on verified proof, the per-1K-view fee after the measuring window, and the rest is refunded to your shielded address.</p>
+        <motion.div className="lp-pay-head" {...reveal()}>
+          <p className="lp-eyebrow">Payment math</p>
+          <h2 id="pay-math-title">See what a deal pays</h2>
+          <p>Move the sliders to see what a deal pays in shielded TAZ (testnet ZEC). The fixed fee is paid when you accept the deal, the per-1K-view fee after the measuring window — each straight from your wallet to the creator's. Anything under the cap is simply never requested.</p>
         </motion.div>
         <div className="lp-calc">
           <motion.div className="lp-calc-inputs" {...reveal(0.05)}>
@@ -364,7 +364,7 @@ function PayoutCalculator() {
             <Range id="calc-cpm" label="Per 1K views" value={cpm} min={0} max={10} step={0.1} format={(v) => `${v.toFixed(2)} TAZ`} onChange={setCpm} />
             <Range
               id="calc-cap"
-              label="Escrow cap"
+              label="Cap"
               value={cap}
               min={10}
               max={500}
@@ -381,12 +381,12 @@ function PayoutCalculator() {
             <p className="lp-calc-total">
               <span>Creator is paid</span>
               <strong>{taz(r.fixed + r.performance)}</strong>
-              <small>of {taz(r.cap)} held by the escrow wallet</small>
+              <small>of a {taz(r.cap)} cap, directly to their wallet</small>
             </p>
-            <div className="lp-stack" role="img" aria-label={`Fixed ${taz(r.fixed)}, performance ${taz(r.performance)}, refunded ${taz(r.refund)}`}>
+            <div className="lp-stack" role="img" aria-label={`Fixed ${taz(r.fixed)}, performance ${taz(r.performance)}, not requested ${taz(r.unused)}`}>
               <span className="lp-s-fixed" style={{ width: w(r.fixed) }} />
               <span className="lp-s-perf" style={{ width: w(r.performance) }} />
-              <span className="lp-s-refund" style={{ width: w(r.refund) }} />
+              <span className="lp-s-unused" style={{ width: w(r.unused) }} />
             </div>
             <dl className="lp-legend">
               <div>
@@ -404,9 +404,9 @@ function PayoutCalculator() {
               </div>
               <div>
                 <dt>
-                  <i className="lp-s-refund" /> Refunded
+                  <i className="lp-s-unused" /> Not requested
                 </dt>
-                <dd>{taz(r.refund)}</dd>
+                <dd>{taz(r.unused)}</dd>
               </div>
             </dl>
             <p className="lp-calc-note">Example numbers · testnet TAZ has no monetary value</p>
@@ -441,11 +441,11 @@ const FEATURES: { id: string; eyebrow: string; title: string; text: string; img?
   {
     id: "private",
     eyebrow: "Pay privately",
-    title: "Shielded Zcash from funding to payout",
-    text: "Campaigns are funded with a shielded invoice and creators are paid to their own shielded Unified Address. Amounts, senders and memos are encrypted on-chain; payout addresses are never shown to advertisers.",
+    title: "Shielded Zcash, wallet to wallet",
+    text: "Advertisers pay each creator directly to a fresh shielded address of the creator's own wallet. Amounts, senders and memos are encrypted on-chain; a view-only scanner confirms receipt, and Zerveil never holds the money.",
     icon: "shield",
-    lines: ["Funding invoice · fresh UA + memo", "Payout · creator's private UA", "Operator approval before every send"],
-    alt: "Shielded funding and payouts",
+    lines: ["Payment request · fresh UA + memo", "Paid to the creator's own wallet", "Confirmed by a view-only scanner"],
+    alt: "Direct shielded payments",
     status: "beta",
     note: "testnet; simulated mode by default",
   },
@@ -453,7 +453,7 @@ const FEATURES: { id: string; eyebrow: string; title: string; text: string; img?
     id: "connect",
     eyebrow: "Connect",
     title: "Built for other agents too",
-    text: "Every creator agent publishes an A2A Agent Card, channel data is available as MCP tools, and paid APIs answer HTTP 402 with a shielded invoice your agent can pay from its credit within your spending limits.",
+    text: "Every creator agent publishes an A2A Agent Card, channel data is available as MCP tools, and paid APIs answer HTTP 402 with a shielded invoice your agent can pay from its prepaid API credit within your spending limits.",
     icon: "bot",
     lines: ["/.well-known/agent-card.json", "MCP tools: search, channel, videos", "HTTP 402 · X-Payment-Id"],
     alt: "Agent Card, MCP tools and HTTP 402",
@@ -514,9 +514,9 @@ function Features() {
 
 const FAQ = [
   { q: "Does real money move today?", a: "No. Zerveil runs on Zcash testnet, where TAZ has no monetary value, and simulated payment mode is the default: in that mode no ZEC moves at all and every payment is labelled simulated." },
-  { q: "Who holds the escrow?", a: "A wallet account operated by Zerveil, not a smart contract: you rely on the operator. Releases follow deterministic rules from verified evidence, and an operator approves each payout before the wallet sends it." },
-  { q: "What can Zerveil see?", a: "Payments are shielded, so amounts, senders and memos are encrypted on-chain. Zerveil sees payments to its own escrow addresses because it holds that wallet; it never publishes them. Creators' payout addresses are private to them and the operator." },
-  { q: "Can the AI spend my budget?", a: "No. The LLM only proposes. Deterministic code checks every offer and spend against your limits, you approve each campaign's deals, and the escrow wallet signs only after those checks and an operator approval." },
+  { q: "Does Zerveil hold my money?", a: "No. Advertisers pay each creator directly, from their own wallet to a fresh address of the creator's own wallet. Zerveil only requests payments and confirms they arrived; it never holds, forwards or returns funds." },
+  { q: "What can Zerveil see?", a: "Payments are shielded, so amounts, senders and memos are encrypted on-chain. Creators connect a viewing key of a dedicated receiving account: it lets Zerveil's scanner see that account's transactions to confirm payments, and it cannot spend. Creators' addresses are private to them and the operator." },
+  { q: "Can the AI spend my budget?", a: "No. The LLM only proposes. Deterministic code checks every offer against your limits, you accept each campaign's deals, and you sign every creator payment yourself in your own wallet. Your agent can only spend prepaid API credit, within your spending limits." },
   { q: "Can advertisers see a creator’s floor?", a: "No. Rate cards never leave the creator’s side." },
 ];
 
@@ -553,8 +553,8 @@ const RESOURCES = [
   {
     icon: "key",
     kind: "Guide",
-    title: "How escrow payouts work",
-    text: "The full cap is funded with a shielded invoice when you approve. The fixed fee is released after the post is verified, the performance fee seven days later, and anything unused is refunded — each payout approved by an operator.",
+    title: "How direct payments work",
+    text: "When you accept a deal, the creator's fixed fee is requested as a shielded payment to their own wallet. The performance fee is computed from verified views seven days later and requested the same way. A view-only scanner confirms each payment and issues a receipt.",
   },
   {
     icon: "agents",
@@ -566,7 +566,7 @@ const RESOURCES = [
     icon: "eye",
     kind: "Product",
     title: "What the content agent checks",
-    text: "Before any payout, the video is checked against your brief: channel, publish window, disclosure, required tags and brand mentions, with reasons a creator can fix.",
+    text: "Before the performance fee, the video is checked against your brief: channel, publish window, disclosure, required tags and brand mentions, with reasons a creator can fix.",
   },
 ];
 
@@ -679,7 +679,7 @@ export function Landing() {
                   Private Payments. <span className="lp-hl">Autonomous Agents.</span>
                 </h1>
                 <p className="lp-hero-lead">
-                  AI agents find creators and negotiate sponsorships within your limits. Campaigns are funded with shielded Zcash, and creators are paid privately once their post is verified.
+                  AI agents find creators and negotiate sponsorships within your limits. Advertisers pay creators directly in shielded Zcash, wallet to wallet; Zerveil never holds the money.
                 </p>
                 <div className="lp-cta-row">
                   <Cta to={advertiserStart} size="lg">
@@ -702,16 +702,16 @@ export function Landing() {
                     <div>
                       <blockquote>
                         <p id="rule-title">
-                          The AI <em>proposes</em>. Rules <em>decide</em>. The escrow wallet <em>signs</em> — only after checks.
+                          The AI <em>proposes</em>. Rules <em>decide</em>. You <em>sign</em> — in your own wallet.
                         </p>
                       </blockquote>
-                      <p className="lp-rule-sub">No payment ever depends on AI output alone. Signing is never an AI tool, and every payout also needs an operator approval.</p>
+                      <p className="lp-rule-sub">No payment ever depends on AI output alone. Signing is never an AI tool, and every creator payment is sent by the advertiser from their own wallet.</p>
                       <Cta to={DOCS} size="lg">
                         Read the design
                       </Cta>
                     </div>
                     <div className="lp-rule-art">
-                      <Art icon="check" lines={["The AI proposes", "Deterministic rules decide", "Operator approves", "Escrow wallet signs"]} label="The AI proposes, deterministic rules decide, an operator approves, the escrow wallet signs" />
+                      <Art icon="check" lines={["The AI proposes", "Deterministic rules decide", "You accept", "You pay from your own wallet"]} label="The AI proposes, deterministic rules decide, you accept, you pay from your own wallet" />
                     </div>
                   </div>
                 </motion.div>
@@ -730,25 +730,25 @@ export function Landing() {
               </div>
             </section>
 
-            <PayoutCalculator />
+            <PaymentCalculator />
             <Features />
 
             {/* For creators */}
             <section className="lp-band lp-band-tight" id="creators" aria-labelledby="creators-title">
               <div className="lp-container">
                 <motion.div className="lp-split" {...reveal()}>
-                  <Art icon="user" lines={["Private rate card · never shared", "Agent inbox · offers and counters", "Shielded payout address · private"]} label="Creator agent with a private rate card and a private payout address" />
+                  <Art icon="user" lines={["Private rate card · never shared", "Agent inbox · offers and counters", "Your own wallet · paid directly"]} label="Creator agent with a private rate card, paid directly to the creator's own wallet" />
                   <div className="lp-split-copy">
                     <p className="lp-eyebrow">For creators</p>
                     <p className="lp-split-quote" id="creators-title">
                       Your agent negotiates above your private floor.
                     </p>
-                    <p className="lp-split-text">Set your rates once and add a shielded payout address. Your agent handles the offers; you are paid privately after your post is verified.</p>
+                    <p className="lp-split-text">Set your rates once, add your shielded address and connect a viewing key of your receiving account. Your agent handles the offers; brands pay your own wallet directly.</p>
                     <ul className="lp-split-list">
                       <li>Niches from your channel</li>
                       <li>Rate card stays private</li>
                       <li>Fix and resubmit if rejected</li>
-                      <li>Payouts to your private Unified Address</li>
+                      <li>Paid directly to your own wallet</li>
                     </ul>
                     <Cta to={influencerStart}>Join as a Creator</Cta>
                   </div>
@@ -779,7 +779,7 @@ export function Landing() {
                       <a href="#verify">Verification</a>
                     </li>
                     <li>
-                      <a href="#payouts">Payouts</a>
+                      <a href="#pay-math">Payments</a>
                     </li>
                   </ul>
                 </nav>

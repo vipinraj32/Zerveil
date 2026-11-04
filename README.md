@@ -3,17 +3,18 @@
 **Private Payments. Autonomous Agents.**
 
 Zerveil is a privacy-powered AI influencer agent marketplace. Advertiser agents find creator agents and negotiate
-sponsorships with them over A2A. Campaigns are funded with **shielded Zcash** into an escrow wallet account. Creators
-are paid to their own shielded Unified Address once their post is verified on YouTube.
+sponsorships with them over A2A. Advertisers then pay each creator **directly**, with **shielded Zcash**, to a fresh
+address of the creator's own wallet. Zerveil never holds the money. It issues invoices, watches the creator's account
+through a viewing key the creator connected, confirms the payment, issues a receipt and tracks the campaign.
 
-> **Status: testnet MVP.**
-> - By default the app runs in `PAYMENT_MODE=simulated`: an in-process wallet stand-in runs the full payment flow,
->   every record is labeled *simulated*, and **no ZEC moves**.
-> - `PAYMENT_MODE=zcash` connects a real Zcash wallet (Zallet) over JSON-RPC on **testnet** (TAZ has no monetary
->   value). That code path is tested against a mocked RPC transport, but it has **not yet been run against a live
->   testnet wallet**. See [Status and blockers](#status-and-blockers).
-> - The escrow is a **wallet account operated by Zerveil**, not a smart contract and not trustless. See
->   [Custody](#custody-what-the-escrow-is-and-is-not) and [PRIVACY.md](PRIVACY.md).
+> **Zcash Testnet — TAZ — No real monetary value.**
+> - By default the app runs in `PAYMENT_MODE=simulated`: an in-process scanner stand-in runs the full flow, every
+>   record is labeled *simulated*, and **no TAZ moves**.
+> - `PAYMENT_MODE=zcash` scans the real testnet with [zcash-devtool](https://github.com/zcash/zcash-devtool) through
+>   the public lightwalletd `testnet.zec.rocks:443`. That path is tested against a stubbed `zcash-devtool` process; it
+>   has **not yet been run against the live testnet by this project**. See [Status and blockers](#status-and-blockers).
+> - **There is no escrow.** Zerveil has no spending key and cannot hold, lock, release or refund funds. See
+>   [Custody](#custody-there-is-none) and [PRIVACY.md](PRIVACY.md).
 
 ## Contents
 
@@ -21,7 +22,7 @@ are paid to their own shielded Unified Address once their post is verified on Yo
 2. [The idea](#the-idea)
 3. [How it works](#how-it-works)
 4. [Why Zcash, and what "shielded" buys you](#why-zcash-and-what-shielded-buys-you)
-5. [Custody: what the escrow is and is not](#custody-what-the-escrow-is-and-is-not)
+5. [Custody: there is none](#custody-there-is-none)
 6. [Payments in detail](#payments-in-detail)
 7. [HTTP 402 and agent spending limits](#http-402-and-agent-spending-limits)
 8. [What you see in the app](#what-you-see-in-the-app)
@@ -29,14 +30,14 @@ are paid to their own shielded Unified Address once their post is verified on Yo
 10. [Trust and safety design](#trust-and-safety-design)
 11. [Payment modes](#payment-modes)
 12. [Run it](#run-it)
-13. [Connect a Zcash testnet wallet](#connect-a-zcash-testnet-wallet)
-14. [Configuration](#configuration)
-15. [Database and migrations](#database-and-migrations)
-16. [Tests: mocked vs real](#tests-mocked-vs-real)
-17. [Deploy: Docker, CI/CD, Render](#deploy-docker-ci-cd-render)
-18. [API reference (payments)](#api-reference-payments)
-19. [Deep dive](#deep-dive)
-20. [Project structure](#project-structure)
+13. [Wallet selection (NU7 / Ironwood)](#wallet-selection-nu7--ironwood)
+14. [Real testnet setup](#real-testnet-setup)
+15. [Configuration](#configuration)
+16. [Database and migrations](#database-and-migrations)
+17. [Tests: mocked vs real](#tests-mocked-vs-real)
+18. [Deploy: Docker, CI/CD, Render](#deploy-docker-cicd-render)
+19. [API reference (payments)](#api-reference-payments)
+20. [Deep dive](#deep-dive)
 21. [Status and blockers](#status-and-blockers)
 22. [References](#references)
 
@@ -56,11 +57,11 @@ Influencer sponsorships are slow and leaky:
 - **Agents negotiate.** Each creator runs an agent that knows their floors. Each advertiser runs an agent that knows the
   campaign's ceilings. They meet over A2A.
 - **Code decides.** The LLM may suggest a move, but a deterministic policy engine accepts, counters or rejects. The
-  LLM never holds a key.
-- **Money waits for proof.** The agreed cap is paid into escrow first. The fixed fee is released when the post is
-  verified, the performance fee after 7 days of views, and the remainder is refunded.
-- **Payments stay private.** Funding, payouts and refunds are shielded Zcash transactions. Amounts, senders, receivers
-  and memos are encrypted on-chain.
+  LLM never holds a key and never signs a payment.
+- **Pay in milestones, wallet to wallet.** The fixed fee is paid upfront to the creator's own wallet. The performance
+  fee is requested after the post is verified and its views are counted at T+7d. Nobody in between holds the money.
+- **Payments stay private.** Every payment is a shielded Zcash transaction. Amounts, senders, receivers and memos are
+  encrypted on-chain.
 
 ## How it works
 
@@ -71,31 +72,41 @@ Advertiser ──► Advertiser Agent ──A2A──► Creator Agents (one at 
               Policy gate (deterministic): terms, payee, budget
                      │
                      ▼
-     Advertiser approves ──► one shielded funding invoice (fresh Unified Address + memo)
-                                       │ advertiser pays from any Zcash wallet
+   Advertiser accepts ──► one invoice per creator: fixed fee, to a fresh address of THAT creator's account
+                                       │ advertiser pays from their own wallet (ZIP-321 link / QR / "pay all")
                                        ▼
-            Wallet scanner sees the note on that address, waits for confirmations ──► deals FUNDED
+   Scanner (creator's viewing key) sees the note ─► seen ─► mined ─► confirming ─► confirmed (3 confs) ─► receipt
                                        │
-        Creator posts ──► Verifier (YouTube API) ──► fixed fee decided ──► operator approves ──► shielded payout
+        Creator posts ──► Verifier (YouTube API) ──► Verified / Rejected / Needs human review
                                        │
-                     +7 days ──► performance fee + refund of the remainder (each approved, then sent)
+                     +7 days ──► performance-fee invoice (views × CPM, capped) ──► paid directly ──► Completed
 ```
 
 1. **Discover and negotiate.** The advertiser agent reads each creator agent's A2A Agent Card and negotiates with
    creators one at a time, within the campaign's ceilings.
 2. **Signed terms.** An accepted deal comes back as `DealTerms`, signed by the creator agent's Ed25519 key. The terms
-   cover the deliverable, the fees, the cap, the deadline and the proof rules. The payee is the creator's shielded
-   Unified Address and the network is `zcash-testnet`. The creator authorized that key while signed in, for that
-   channel and that payout address.
+   cover:
+   - the deliverable, fees, cap and deadline;
+   - the proof rules;
+   - the payee (the creator's shielded Unified Address) and the network, `zcash-testnet`.
 3. **Policy gate.** Deterministic code re-checks the signature, payee, network, amounts and content rules. It then
    reserves the cap from the campaign budget.
-4. **Approve and fund.** The advertiser approves the agreements and receives **one invoice**: the sum of the caps plus
-   a small fee reserve per deal. It names a fresh shielded Unified Address, an amount, a memo `ZRV1:PAY-…` and a
-   ZIP-321 payment link.
-5. **Verified by the wallet.** The deals become `FUNDED` only when the escrow wallet itself has received enough on that
-   address, with the required confirmations. A transaction id typed by a user is never accepted.
-6. **Proof, then payouts.** The verifier checks the post: channel, timing, length, tags, disclosure and prompt
-   injection. Payouts are decided by code and queued; an operator approves each one before the wallet sends it.
+4. **Accept and pay.** The advertiser accepts the agreements. Each creator gets a **fixed-fee milestone invoice**
+   containing:
+   - a fresh diversified Unified Address of the creator's connected receiving account;
+   - the amount;
+   - a memo `ZRV1:PAY-…`;
+   - a ZIP-321 link.
+
+   One ZIP-321 "pay all" request covers every open invoice of the campaign.
+5. **Confirmed by scanning.** The scanner holds the creator's viewing key. It finds the note on that address and
+   follows it to `ZCASH_CONFIRMATION_THRESHOLD` confirmations (default 3). It then issues a receipt. A transaction id
+   typed by a user is never accepted.
+6. **Proof, then performance.** The verifier checks the post: channel, timing, length, tags, disclosure and prompt
+   injection. At T+7d the performance fee is computed from views and requested as a second invoice.
+
+Campaign progress in the UI: Draft → Agent Negotiation → Agreement Accepted → Payment Requested → Payment Pending →
+Payment Confirmed → Content Creation → Content Submitted → Content Verification → Completed.
 
 ## Why Zcash, and what "shielded" buys you
 
@@ -106,62 +117,63 @@ Advertiser ──► Advertiser Agent ──A2A──► Creator Agents (one at 
 | Who paid whom | public | encrypted on-chain |
 | Payment memo / reference | public calldata | encrypted memo, readable only by the recipient |
 
-Each invoice gets its own diversified Unified Address with Orchard and Sapling receivers only, no transparent
-receiver. Zerveil only pays to shielded Unified Addresses: it refuses transparent `t…` addresses and asks for a Unified
-Address instead of a bare Sapling address.
+Each invoice gets its own diversified Unified Address with shielded receivers only: Orchard (paid into Ironwood after
+NU7) and Sapling, with no transparent receiver. Without the viewing key, those addresses cannot be linked to each
+other or to the creator.
 
-**What shielding does not hide:** the Zerveil operator holds the escrow wallet, so it sees what that wallet receives
-and sends. The app database also stores deal amounts. See [PRIVACY.md](PRIVACY.md) for exactly who sees what.
+**What shielding does not hide:**
+- The operator's scanner holds the viewing keys creators connected, so it can see those accounts' transactions.
+- The app database stores deal amounts.
 
-## Custody: what the escrow is and is not
+See [PRIVACY.md](PRIVACY.md).
 
-- The escrow is **an account in a Zcash wallet that the Zerveil operator runs** (Zallet). It is **not a smart
-  contract** and **not trustless**. Shielded Zcash has no general-purpose contracts to lock funds under on-chain
-  rules.
-- Release rules are **deterministic code** in `services/deals.py` and `payments/service.py`. By default
-  (`PAYOUT_APPROVAL_REQUIRED=true`) **every payout also needs an operator's approval** before the wallet signs it.
-- Refunds of unusable money (late payments, partial payments to an expired invoice) **always** need an operator,
-  whatever that setting says.
-- The **custody view** (`/api/admin/custody`) puts the wallet's escrow balance next to what the records say it should
-  hold. Every invoice, note, payout and decision is in an append-only `payment_events` audit trail.
+## Custody: there is none
 
-Advertisers and creators trust the operator to run the wallet honestly. The MVP makes that trust auditable; it does
-not remove it.
+- **There is no escrow, operator wallet, payout queue or refund.** Zerveil has no spending key, so it cannot move
+  anyone's money. Earlier versions had an operator-run escrow account; it was removed (see
+  [Database and migrations](#database-and-migrations)).
+- Advertisers pay creators from their own wallets, and creators receive in their own wallets.
+- HTTP 402 API calls and agent API credit are paid directly to the **API seller's** own receiving account
+  (`ZCASH_API_SELLER_UFVK`), not to an intermediary.
+- **The trade-off is that neither side is protected by an intermediary:**
+  - an advertiser is not protected from a creator who takes the fixed fee and does not post;
+  - a creator is not protected from an advertiser who does not pay the performance fee.
+
+  Milestones keep that exposure small. Disputes are settled between the parties' wallets.
 
 ## Payments in detail
 
 **Invoice lifecycle** (`payments/service.py`):
 
 ```
-pending ──(note below amount)──► underpaid ──(rest arrives)──► confirming ──(≥ confirmations)──► paid
-   │                                 │                                    (never expires once paid in full)
-   └──(TTL passes)──► expired ◄──────┘
-                         └──(money arrives after expiry)──► late_payment ──► refund queued (operator approval)
-pending ──(owner cancels, nothing received)──► cancelled
+awaiting_payment ──(note in mempool)──► seen ──(mined)──► mined ──► confirming ──(≥ 3 confirmations)──► confirmed
+       │                                                                                    └─► overpaid (> amount)
+       ├──(less than the amount)──► underpaid ──(rest arrives)──► …
+       ├──(TTL passes, nothing seen)──► expired   (money that arrives later is recorded as a late payment; Zerveil
+       │                                           cannot refund it — the parties settle it wallet to wallet)
+       └──(owner cancels, nothing received)──► cancelled
 ```
 
-The scanner reads the wallet's received notes. Each note is identified by `txid:pool:output_index` and counted for at
-most one invoice, through an atomic claim; rescans never count it twice. Matching is by the invoice's own one-time
-address. The memo is a secondary signal, recorded as `memo_matched`.
+- A payment seen before expiry keeps confirming after the TTL. An invoice expires only if nothing was seen in time.
+- If the scanner cannot reach lightwalletd, that account is skipped for the round. Its invoices are **never expired
+  or confirmed on a failed scan**.
+- Each note is identified by `txid:pool:output_index`. An atomic claim ensures it counts for at most one invoice.
+- Matching is by the invoice's own one-time address. The `ZRV1:` memo is a secondary match.
+- On confirmation a **receipt** (`RCPT-…`) is issued once. Its `receipt_hash` is a SHA-256 over its fields.
 
-**Payout queue:**
-
-```
-pending_approval ─► approved ─► sending ─► submitted ─► sent ─► confirmed
-        │                          │           │
-        └─► rejected               ├─► failed  └─► unknown ──(found by memo in wallet history)──► sent
-                                   └─► unknown ──(operator checked: not sent)──► approved (resend) / rejected
-```
-
-- Every transition is compare-and-set, so two workers can never both send.
-- Each payout is idempotent on its key (e.g. `<deal>:fixed`).
-- A send whose outcome was lost (timeout, crash) becomes `unknown`. It is reconciled from the wallet's outgoing
-  memos (`ZRV1:PO-…`) and is **never resent automatically**.
+**Milestones** (`models.Milestone`):
+- **Kinds:**
+  - `fixed` is requested when the agreement is accepted, and skipped for CPM-only deals.
+  - `performance` is requested at T+7d after verification, and waived when it computes to zero.
+- **Statuses:** `scheduled → requested → pending → confirmed`, or `expired` / `waived`.
+- **Amount checks** (`policy.check_milestone`):
+  - the fixed milestone must equal the signed fixed fee;
+  - the performance milestone may not exceed `cap − fixed`.
 
 **Amounts.**
 - Amounts are exact decimals with at most 8 places (zatoshi).
-- Each deal's funding includes `ZCASH_FEE_RESERVE_PER_DEAL` (default 0.0003) to pay ZIP-317 fees for its payouts.
-- The fee reserve that is not spent stays in the escrow account; the custody view shows it.
+- Network fees are paid by the payer's wallet on top of the invoice amount, calculated by that wallet (ZIP-317).
+- Zerveil never adds a fee reserve.
 
 ## HTTP 402 and agent spending limits
 
@@ -171,92 +183,114 @@ pending_approval ─► approved ─► sending ─► submitted ─► sent ─
 {
   "error": "payment_required",
   "payment": {"id": "PAY-…", "amount": "0.05", "ticker": "TAZ", "address": "utest1…", "memo": "ZRV1:PAY-…",
-              "zip321_uri": "zcash:utest1…?amount=0.05&memo=…", "status": "pending", "required_confirmations": 3},
+              "zip321_uri": "zcash:utest1…?amount=0.05&memo=…", "status": "awaiting_payment",
+              "required_confirmations": 3, "direct": true},
   "retry_with_header": {"X-Payment-Id": "PAY-…"}
 }
 ```
 
-Pay the invoice, then repeat the request with `X-Payment-Id`. Results unlock once the wallet sees the payment
-confirmed. Each payment unlocks **one** request, for **its own** scope and user.
+The address belongs to the API seller's own account. To use it:
+1. Pay the invoice.
+2. Repeat the request with `X-Payment-Id`.
 
-**Agents pay too.** `POST /api/agent/premium-search` lets the advertiser's agent pay the 402 from **prepaid agent
+Results unlock once the payment is confirmed. Each payment unlocks **one** request, for **its own** scope and user.
+
+**Agents pay too.** `POST /api/agent/premium-search` lets the advertiser's agent pay the 402 from **prepaid API
 credit**:
-- Credit is topped up **only** through a verified shielded `credit_topup` invoice.
-- Spending follows the owner's `SpendingPolicy`: on/off, allowed categories, per-request and 24-hour limits, and a
-  `max_campaign_budget` that also caps new campaigns.
+- Credit is topped up **only** through a confirmed shielded `credit_topup` invoice paid to the API seller.
+- Spending follows the owner's `SpendingPolicy`:
+  - on/off and allowed categories;
+  - per-request and 24-hour limits;
+  - a `max_campaign_budget` that also caps new campaigns.
 - Above `approval_above`, the agent files a spend request and waits for its owner to approve.
 - The limit check and the debit happen under one lock, so parallel requests cannot overspend.
 
 ## What you see in the app
 
-- **Testnet badge** everywhere, plus a "simulated: no ZEC moves" badge in simulated mode.
+- **"Zcash Testnet — TAZ — No real monetary value"** on every page, plus a "simulated" badge on simulated records.
 - **Onboarding:**
-  - Creators sign in with Google (YouTube channel), add a shielded payout address and set their rates.
-  - Advertisers add a shielded refund address and their brand.
-- **Campaigns:** live negotiation room, approval panel and a **shielded checkout**: amount, Unified Address, memo,
-  "open in wallet" ZIP-321 link, status and confirmations, expiry. In dev, a *simulate payment* button.
-- **Public payment page** `/pay/:id`: what to pay and whether it arrived. No transaction ids, no campaign terms.
-- **Payments:**
-  - Advertisers: invoices, agent credit and top-up, spending limits, spend approvals, the 402 demo.
-  - Creators: payouts received and **payment links** (paid in, then forwarded to their own address after
-    approval).
-- **Admin:** payout approval queue with evidence hashes, unknown-outcome resolution, custody reconciliation and the
-  payment audit trail.
+  - Creators sign in with Google (YouTube channel) and set their Unified Address and rates. They then **connect a
+    receiving account**: viewing key, birthday height and explicit consent. They are listed only once connected.
+  - Advertisers add their company and brand handle. They need no wallet address.
+- **Campaigns:**
+  - the negotiation room and approval panel;
+  - one payment card per creator: amount, address, memo, QR code, ZIP-321 link, status with confirmation progress,
+    and receipt link;
+  - a "pay all" QR code and link;
+  - milestone status per deal;
+  - in simulated mode, a *simulate payment* button.
+- **Public payment page** `/pay/:id`: what to pay, a QR code, and whether it arrived. It shows no txids and no
+  campaign terms.
+- **Wallet status:**
+  - scanner backend, network, lightwalletd reachability, chain tip and NU7 status;
+  - your address;
+  - "confirmed received via Zerveil", which is not a wallet balance;
+  - a faucet link on testnet.
+- **Receipts:** a list and a detail view (amount, pools, txids with explorer links, confirmations, mined height, hash).
+- **Admin (read-only):** scanner status, open invoices and the payment audit trail. Operators cannot move funds.
 
-**Frontend stack note:** the UI is React + TypeScript + Vite with **plain CSS** (CSS variables, dark violet/cyan
-theme). The original prompt suggested Tailwind. We kept the existing design system because rewriting every
-component's styling would add risk without changing behavior.
+**Frontend stack note:** the UI is React + TypeScript + Vite with **plain CSS**. The integration prompt asked to
+"preserve Tailwind CSS", but this project never used Tailwind, so the existing plain-CSS design system was kept.
 
 ## Architecture
 
 ```
-                         ┌───────────────────────── FastAPI (one process) ─────────────────────────┐
- Browser (React) ──HTTPS─►  /api (auth, campaigns, deals, payments, admin)   /api/stream (SSE)        │
-                         │  /a2a/influencers/{id}  (A2A creator agents)       /mcp (read-only MCP)    │
-                         │  Advertiser agent (LangGraph) ─► DealService ─► PaymentService ─► Wallet ──┼─JSON-RPC─► Zallet
-                         │  Scheduler: payment scan · payout decisions · payout queue                 │   (testnet)
-                         └──────────────┬─────────────────────────────────────────────────────────────┘
-                                        ▼
-                               PostgreSQL (or in-memory)
+                   ┌──────────────────────── FastAPI (one process) ────────────────────────┐
+ Browser (React) ──►  /api (campaigns, deals, payments, receipts, admin)   /api/stream (SSE) │
+                   │  /a2a/influencers/{id} (A2A creator agents)    /mcp (read-only MCP)     │
+                   │  Advertiser agent ─► DealService ─► PaymentService ─► Scanner ──────────┼─► zcash-devtool (subprocess,
+                   │  Scheduler: payment scan · milestone due dates                         │   view-only wallet dir)
+                   └──────────────┬─────────────────────────────────────────────────────────┘          │ gRPC/TLS
+                                  ▼                                                                    ▼
+                         PostgreSQL (or in-memory)                                   lightwalletd testnet.zec.rocks:443
+
+ Advertiser's wallet ─────────── shielded tx, signed by the advertiser ───────────► creator's own wallet account
 ```
 
-- `agents/`: LangGraph advertiser agent; A2A creator agents (`a2a-sdk`), whose LLM only suggests.
-- `agent_policy/`, `policy/`: deterministic negotiation and payment rules.
-- `services/deals.py`: deal lifecycle. `payments/service.py`: invoices, scanner, payouts, credit, links, custody.
-- `zcash/`:
-  - `rpc.py`: the real wallet over JSON-RPC.
-  - `simulated.py`: the dev and test stand-in.
-  - Address, ZIP-321, memo and amount helpers.
-- `verifier/`: YouTube Data API checks. `compliance/`: disclosure policies.
-- `store/`: PostgreSQL and in-memory stores; `migrations.py`.
+- `zcash/wallet.py` defines the `PaymentScanner` protocol: `import_viewing_key`, `new_address`, `received`, `info`.
+  **There is no send method.**
+- Scanner backends:
+  - `zcash/devtool.py`: `DevtoolScanner`, the real backend. It runs the `zcash-devtool` CLI against a view-only
+    wallet.
+  - `zcash/simulated.py`: `SimulatedScanner`, for development and tests.
+- `zcash/address.py`: Bech32m Unified Address and viewing-key checks. It rejects seed phrases and spending keys.
+- Other `zcash/` helpers: `zip321.py` (single and multi-recipient URIs), `memo.py` and `amounts.py`.
+- `payments/service.py`: receiving accounts, invoices, scanning, receipts, payment links, API credit and the 402.
+- `services/deals.py`: the deal lifecycle and milestones.
+- The other packages: `agents/`, `agent_policy/`, `policy/`, `verifier/`, `compliance/` and `store/`.
 
 ## Trust and safety design
 
-- **The LLM proposes, code decides, the wallet signs after checks and approval.** No LLM or MCP tool can sign, create
-  invoices or release funds.
-- **No payment without wallet evidence.** Only notes the escrow wallet decrypted on the invoice's own address count,
-  with confirmations. User-supplied txids are never evidence.
-- **No double counting, no double paying:** atomic note claims, idempotent payout keys, compare-and-set statuses, and
-  `unknown` reconciled from the wallet's history, never blindly resent.
-- **Terms are bound:** approval is refused if the signed terms changed after the policy gate, and the funding amount
-  must equal the caps plus the fee reserve.
-- **Address checks:**
-  - Payees must be shielded Unified Addresses on the configured network (Bech32m checksum, network prefix).
-  - In zcash mode the wallet also checks the receivers (`z_listunifiedreceivers`).
+- **The LLM proposes, code decides, the payer's wallet signs.** No LLM or MCP tool can sign, create invoices or move
+  funds, and Zerveil has no key that could.
+- **No payment without scan evidence.**
+  - Only notes the scanner itself decrypted on the invoice's address count, and only with confirmations.
+  - User-supplied txids are never evidence.
+  - An unconfirmed payment is never treated as confirmed.
+- **No double counting:** atomic note claims, compare-and-set statuses, and receipts issued once.
+- **Terms are bound:**
+  - approval is refused if the signed terms changed after the policy gate;
+  - each milestone amount is checked against the signed terms.
+- **Keys: viewing keys only.**
+  - Seed phrases, spending keys, incoming-only keys and wrong-network keys are refused.
+  - The viewing key goes to the scanner; the database keeps only a fingerprint.
+  - Scanner errors are redacted.
 - **Privacy by default:**
-  - A creator's payout address is visible only to them and operators; it is redacted for advertisers and never
-    listed in the directory or Agent Card.
-  - `/api/status` never shows the RPC URL or credentials.
-- **Prompt injection:** a video description that instructs "AI reviewers" is rejected by the verifier.
-- **Fail closed:** `PAYMENT_MODE=zcash` refuses to start without wallet configuration and never falls back to
-  simulation. The removed `hosted`/`sepolia` modes are rejected with a clear message.
+  - A creator's address is visible only to them and to operators. It is never in the directory or Agent Card.
+  - `/api/status` never shows secrets or local paths.
+- **Prompt injection:** the verifier rejects a video description that instructs "AI reviewers".
+- **Fail closed:**
+  - `PAYMENT_MODE=zcash` refuses to start without the scanner configuration or the binary.
+  - It refuses mainnet.
+  - It never falls back to simulation.
+  - The removed `escrow`, `hosted` and `sepolia` modes are rejected.
 
 ## Payment modes
 
-| Mode | Wallet | Money | Use |
+| Mode | Scanner | Money | Use |
 |---|---|---|---|
-| `simulated` (default) | in-process `SimulatedZcashWallet` | none; fake `utest` addresses, `sim…` txids, everything labeled simulated | development, demos, CI |
-| `zcash` | Zallet JSON-RPC (`zcash/rpc.py`) | real TAZ on testnet | integration with a real wallet |
+| `simulated` (default) | in-process `SimulatedScanner` | none; fake `utest` addresses, `sim…` txids, everything labeled simulated | development, demos, CI |
+| `zcash` | `DevtoolScanner` (`zcash-devtool` + lightwalletd) | real TAZ on testnet, paid wallet to wallet | real testnet |
 
 ## Run it
 
@@ -264,7 +298,7 @@ Requirements: Python 3.13 with [uv](https://docs.astral.sh/uv/), Node 22. Postgr
 
 ```bash
 cp .env.example .env              # fill in Google OAuth, SESSION_SECRET, YOUTUBE_API_KEY
-uv sync
+uv sync                           # Windows: set UV_LINK_MODE=copy
 cd web && npm install && npm run build && cd ..
 uv run zerveil serve              # http://localhost:8000
 ```
@@ -272,43 +306,95 @@ uv run zerveil serve              # http://localhost:8000
 Hot reload: run `cd web && npm run dev` (port 5173, proxies the API) next to `uv run zerveil serve`.
 
 Simulated walkthrough:
-1. Sign in as an advertiser and add a refund address. Any valid `utest1…` Unified Address works; in simulated mode it
-   is only checked for format.
-2. Create a campaign and watch the negotiation.
-3. Approve the agreements and click **Simulate payment** on the checkout.
+1. Sign in as a creator and set any valid `utest1…` Unified Address. Connect a receiving account; in simulated mode
+   the form accepts a `sim:` key.
+2. Sign in as an advertiser, create a campaign and watch the negotiation.
+3. Accept the agreements and click **Simulate payment** on each payment card.
 4. Submit a proof as the creator.
-5. Approve the payouts as an `ADMIN_EMAILS` account.
-6. Use the dev clock to jump 7 days ahead.
+5. Use the dev clock to jump 7 days ahead, then pay the performance invoice.
 
-## Connect a Zcash testnet wallet
+## Wallet selection (NU7 / Ironwood)
 
-Zerveil talks to a **Zallet** wallet (the successor to zcashd's wallet), which needs a **Zebra** full node. Follow the
-official guides; this list only names the steps:
+The wallet integration has to meet these requirements:
+- **Network:** testnet, through a public lightwalletd (`testnet.zec.rocks:443`).
+- **NU7 compatibility:**
+  - testnet activation height **4,465,026**, branch id `0x77190AD9`;
+  - v6 transactions, with Orchard outputs going to the Ironwood pool;
+  - no v4 transactions.
+- **Fees:** ZIP-317 fees computed by the wallet.
+- **Scanning with a viewing key**, because Zerveil must not hold funds.
 
-1. Run Zebra on testnet and let it sync.
-2. Install Zallet, point it at Zebra, set the network to testnet, and enable its JSON-RPC on `127.0.0.1` (Zallet's
-   `[rpc]` settings; add RPC auth if you expose it beyond loopback).
-3. Create or choose a wallet account for the escrow (see Zallet's account commands; `z_listaccounts` lists them) and get
-   a Unified Address for it (`z_getaddressforaccount`).
-4. Fund the escrow with testnet TAZ from a faucet, to cover payout fees.
-5. Set the following in `.env`:
+| Option | NU7 | Viewing-key import | Light client (lightwalletd) | Verdict |
+|---|---|---|---|---|
+| **zcash-devtool** (main) | yes — built on the librustzcash cohort that supports NU7; the testnet faucet runs it | yes: `init-fvk`, `import-ufvk` (Unified Full Viewing Keys) | yes | **selected** |
+| Zallet (beta) | follows NU7 | `z_importviewingkey` accepts Sapling keys only, so it cannot watch Orchard/Ironwood | no: needs a synced Zebra full node | rejected for scanning |
+| zingolib / zingo-cli | NU7 cohort (v8) | view-only import exists, but there is no stable machine-readable CLI to integrate | yes | not selected |
+| zcashd | deprecated, no NU7 | — | — | rejected |
+
+**Selected: zcash-devtool.** Zerveil drives it as a subprocess (`zcash/devtool.py`) with a dedicated **view-only**
+wallet directory. It uses these commands:
+- `init-fvk` / `import-ufvk`;
+- `list-accounts`;
+- `generate-address -p orchard -p sapling`;
+- `sync`, `get-info` and `list-tx`.
+
+The text output is parsed fail-closed: output it does not recognize counts as nothing.
+
+zcash-devtool itself carries two caveats:
+- It is a developer tool, not production software.
+- Its command-line interface can change without warning, so pin the commit you build.
+
+For payers, any NU7-capable shielded wallet works. That includes zcash-devtool's own
+`pay --payment-uri <zip321>`, which uses ZIP-317 fees. `send` accepts `--tx-version`: never pass `4`.
+
+## Real testnet setup
+
+Zerveil automates none of the steps below. It never creates wallets for you, never claims faucet funds, and never
+handles a seed phrase or spending key.
+
+1. **Build zcash-devtool** (requires a Rust toolchain):
+   ```bash
+   git clone https://github.com/zcash/zcash-devtool && cd zcash-devtool
+   cargo build --release            # binary: target/release/zcash-devtool
+   ```
+2. **Each creator: create a dedicated receiving account** in their own wallet. Any NU7-capable wallet works. With
+   zcash-devtool:
+   ```bash
+   zcash-devtool wallet -w ./creator-wallet init --name creator -i ./creator.age -n test
+   zcash-devtool wallet -w ./creator-wallet sync
+   zcash-devtool wallet -w ./creator-wallet list-accounts     # prints the account's UFVK (uviewtest1…)
+   ```
+   The age identity file encrypts the seed phrase. Keep it and the wallet directory private.
+3. **Connect it in Zerveil:** go to Payments → Receiving account.
+   - Paste the **UFVK** (`uviewtest1…`), never the seed phrase.
+   - Enter the birthday height.
+   - Read the authorization and tick consent.
+4. **Each advertiser: create and fund a wallet.**
+   - Create a wallet the same way.
+   - Claim TAZ from the faucet (<https://zcash-faucet.vercel.app/>) yourself, to one of your own shielded addresses.
+   - Shield any transparent funds before paying (`zcash-devtool wallet -w … shield`).
+5. **Operator (Zerveil server):**
    ```
    PAYMENT_MODE=zcash
    ZCASH_NETWORK=testnet
-   ZCASH_WALLET_RPC_URL=http://127.0.0.1:<rpc port>
-   ZCASH_WALLET_RPC_USER=…            # if RPC auth is on
-   ZCASH_WALLET_RPC_PASSWORD=…
-   ZCASH_ESCROW_ACCOUNT=<account uuid or number>
-   ZCASH_ESCROW_FROM_ADDRESS=utest1…
-   ADMIN_EMAILS=you@example.com
+   ZCASH_WALLET_BACKEND=zcash-devtool
+   ZCASH_LIGHTWALLETD_URL=https://testnet.zec.rocks:443
+   ZCASH_DEVTOOL_BIN=/path/to/zcash-devtool
+   ZCASH_DEVTOOL_WALLET_DIR=/private/zerveil-scanner     # view-only: holds only imported viewing keys
+   ZCASH_API_SELLER_UFVK=uviewtest1…                     # optional: the API seller's own receiving account
+   ZCASH_API_SELLER_BIRTHDAY=<height>
    ```
-6. Start Zerveil. It refuses to start if any of these are missing. `/api/wallet/status` (and the admin custody view) shows
-   whether the wallet answers.
-7. Optional: run the real-testnet checks with `ZCASH_LIVE_RPC_URL=… uv run pytest tests/test_zcash_live.py -s`. Add
-   `ZCASH_LIVE_SEND=1 ZCASH_LIVE_SEND_TO=utest1…` to also send 0.0001 TAZ and print the txid.
-
-Wallet RPC methods used are listed in `zcash/rpc.py`; all are in Zallet's zcashd-compatibility table. The RPC is
-plain HTTP: **never expose it to the internet.**
+   Start Zerveil. `/api/wallet/status` shows reachability, the chain tip and whether NU7 is active.
+6. **Pay:**
+   - Open the campaign's payment card.
+   - Pay the ZIP-321 link or QR code from the advertiser's wallet, for example
+     `zcash-devtool wallet -w ./advertiser-wallet pay -i ./advertiser.age --payment-uri 'zcash:…'`.
+   - Watch the card go `seen → mined → confirming → confirmed`, then open the receipt.
+7. **Real-testnet tests** (read-only):
+   ```bash
+   ZCASH_LIVE_DEVTOOL_BIN=… ZCASH_LIVE_WALLET_DIR=… ZCASH_LIVE_UFVK=uviewtest1… ZCASH_LIVE_BIRTHDAY=… \
+   ZCASH_LIVE_EXPECT_TXID=<a txid you paid> uv run pytest tests/test_zcash_live.py -s
+   ```
 
 ## Configuration
 
@@ -317,79 +403,91 @@ See [`.env.example`](.env.example). Key settings:
 | Variable | Default | Meaning |
 |---|---|---|
 | `PAYMENT_MODE` | `simulated` | `simulated` or `zcash` |
-| `ZCASH_NETWORK` | `testnet` | `testnet` / `mainnet` / `regtest` (MVP: testnet) |
-| `ZCASH_WALLET_RPC_URL`, `_USER`, `_PASSWORD` | – | Zallet JSON-RPC |
-| `ZCASH_ESCROW_ACCOUNT`, `ZCASH_ESCROW_FROM_ADDRESS` | – | the escrow account and the UA payouts are sent from |
-| `ZCASH_CONFIRMATION_THRESHOLD` | 3 | confirmations before an invoice counts as paid |
-| `ZCASH_INVOICE_TTL_MINUTES` | 120 | funding / top-up invoice lifetime |
-| `ZCASH_FEE_RESERVE_PER_DEAL` | 0.0003 | added to funding for payout fees |
-| `PAYOUT_APPROVAL_REQUIRED` | true | operator approves each payout |
-| `ADMIN_EMAILS` | – | operators (payout approval, custody) |
+| `ZCASH_NETWORK`, `ZCASH_TESTNET_ENABLED` | `testnet`, `true` | `zcash` mode is testnet-only |
+| `ZCASH_WALLET_BACKEND` | `zcash-devtool` | the only real scanner backend |
+| `ZCASH_LIGHTWALLETD_URL` | `https://testnet.zec.rocks:443` | lightwalletd server |
+| `ZCASH_DEVTOOL_BIN`, `ZCASH_DEVTOOL_WALLET_DIR` | `zcash-devtool`, – | the scanner binary and its private view-only wallet |
+| `ZCASH_PAYMENT_SCANNER_ENABLED` | true | the scheduler scans for payments |
+| `ZCASH_CONFIRMATION_THRESHOLD` | 3 | confirmations before a payment counts as confirmed |
+| `ZCASH_INVOICE_TTL_MINUTES` | 1440 | milestone invoice lifetime |
+| `ZCASH_RECEIVER_TYPES` | `orchard,sapling` | receivers in invoice addresses |
+| `ZCASH_API_SELLER_UFVK`, `_BIRTHDAY` | – | the API seller's receiving account (HTTP 402, API credit) |
+| `ZCASH_EXPLORER_TX_URL`, `ZCASH_FAUCET_URL` | –, faucet | links in the UI |
+| `ZCASH_WALLET_RPC_URL`, `ZCASH_WALLET_AUTH_TOKEN` | – | reserved; not used by the zcash-devtool backend |
+| `ADMIN_EMAILS` | – | operators (read-only scanner and audit views) |
 | `PREMIUM_SEARCH_PRICE` | 0.05 | price of the 402-gated search |
 
 ## Database and migrations
 
-- PostgreSQL via psycopg 3 (`DATABASE_URL`); without it, an in-memory store.
+- The database is PostgreSQL via psycopg 3 (`DATABASE_URL`). Without it, Zerveil uses an in-memory store.
 - Schema changes are versioned in `src/zerveil/store/migrations.py`. They are applied automatically at startup under
   an advisory lock, or by hand with `uv run zerveil migrate` (`--status` lists them).
-- Migration 2 (`zcash_payments`) adds `invoices` (unique address), `payout_requests`, `agent_credit_ledger`,
-  `agent_spend_requests` and `payment_events`. It also widens budget amounts to 8 decimals and drops the old webhook
-  table.
-- **Old EVM-era data:**
-  - Deals that were mid-payment under the removed EVM flow are moved to `ARCHIVED` and their budget is released.
-  - Old wallet links are removed and creators' agents are paused until they add a shielded payout address.
+- **Migration 3 (`direct_payments`) removes escrow while keeping the data:**
+  - It creates `receiving_accounts`, `payment_receipts` and `deal_milestones`, and adds `invoices.recipient_id`.
+  - It renames `payout_requests` to `legacy_escrow_payouts` (read-only history).
+  - It moves deals left in escrow states to `ARCHIVED` with a reason, and releases their budget reservations.
+  - It cancels open escrow invoices; their data is kept.
+  - It maps old statuses:
+    - `paid` → `confirmed`;
+    - `late_payment` → `expired`;
+    - `campaign_funding` → `milestone`;
+    - campaign status `funding` → `awaiting_payment`.
+  - **Money already in an old escrow account is not touched by the migration.** Its operator must return it from that
+    wallet by hand.
+- Migration 2 (`zcash_payments`) introduced invoices, credit, spend requests and the payment audit trail.
 
 ## Tests: mocked vs real
 
 ```bash
-uv run pytest          # everything below except the real-wallet tests
+uv run pytest
 uv run ruff check . && uv run ruff format --check .
 ```
 
-| Suite | Wallet | What it proves |
+| Suite | Backend | What it proves |
 |---|---|---|
-| `test_e2e.py`, `test_payment_api.py`, `test_negotiation_*`, … | **simulated** | the full app flow through the HTTP API: negotiation → funding invoice → scan → proofs → approved payouts; 402; links; admin auth |
-| `test_payments.py` | **simulated** | invoice states, duplicate notes, expiry and late refunds, payout queue (approval, races, failures, lost outcomes), agent credit and limits |
-| `test_zcash.py` | **mocked RPC** (`httpx.MockTransport`) | what we send to Zallet and how we parse its answers; Bech32m/UA, ZIP-321, memos, amounts; fail-closed config |
-| `test_policy.py` | none | terms, signatures, payee and network checks, funding check, delegation |
-| `test_store_postgres.py` | none | PostgreSQL store and migrations (needs `TEST_DATABASE_URL`, else skipped) |
-| `test_zcash_live.py` | **REAL testnet wallet** | reachability, fresh shielded addresses, scanning, optional real send (needs `ZCASH_LIVE_*`, else skipped) |
+| `test_e2e.py`, `test_payment_api.py`, `test_negotiation_*`, … | **MOCKED** (simulated scanner) | the whole app flow over HTTP: negotiation → per-creator invoices → scan → receipts → proofs → performance milestone; 402; links; admin auth; no secrets exposed |
+| `test_payments.py` | **MOCKED** (simulated scanner) | invoice states (seen/mined/confirming/confirmed/underpaid/overpaid/expired), duplicate notes, scanner failure, receipts, credit and limits |
+| `test_zcash.py` | **MOCKED** (`zcash-devtool` subprocess stubbed with canned output) | the commands we run, output parsing, NU7 status, key redaction; UA/UFVK checks, ZIP-321, memos, amounts; fail-closed config |
+| `test_policy.py` | none | terms, signatures, payee and network checks, milestone checks, delegation |
+| `test_store_postgres.py` | real PostgreSQL | store and migrations (needs `TEST_DATABASE_URL`, else skipped) |
+| `test_zcash_live.py` | **REAL testnet** | lightwalletd past NU7, viewing-key import and fresh addresses, a real received payment (needs `ZCASH_LIVE_*`, else skipped) |
 
-The mocked RPC tests use response shapes taken from the Zallet/zcashd documentation. They do not prove that a live
-wallet answers exactly that way; only `test_zcash_live.py` can.
+The canned `zcash-devtool` output is built from the print statements in its source. Only `test_zcash_live.py` proves
+that the live binary answers that way.
 
 ## Deploy: Docker, CI/CD, Render
 
-- `Dockerfile`: builds the React app, then the Python app; runs `zerveil serve` as a non-root user. The Zcash wallet is
-  **not** in the image: run Zallet separately and reach it over a private network.
-- `.github/workflows/ci.yml`:
+- **`Dockerfile`** builds the React app, then the Python app, and runs `zerveil serve` as a non-root user.
+  **zcash-devtool is not in the image.** For `PAYMENT_MODE=zcash`, extend the image with the binary and mount a
+  persistent private directory for `ZCASH_DEVTOOL_WALLET_DIR`.
+- **`.github/workflows/ci.yml`:**
   1. Lint and tests (PostgreSQL service included).
   2. Frontend build.
-  3. Docker build and a smoke run, which asserts `payment_mode == simulated` and testnet.
+  3. Docker build and a smoke run, which asserts `simulated` mode and testnet.
   4. Deploy to Render via a deploy hook on `main`.
-- `render.yaml`: one Docker web service. Secrets are entered in the dashboard (`sync: false`), never in git. Keep
-  `PAYMENT_MODE=simulated` unless the service can reach a private Zallet RPC.
+- **`render.yaml`** defines one Docker web service. Secrets are entered in the dashboard (`sync: false`), never in git.
+  Keep `PAYMENT_MODE=simulated` there unless the image includes zcash-devtool and a persistent disk.
 
 ## API reference (payments)
 
 | Method & path | Who | Purpose |
 |---|---|---|
-| `PUT /api/me/zcash-address` | user | set payout (creator) / refund (advertiser) Unified Address |
-| `POST /api/campaigns/{id}/decision` | advertiser | approve → one funding invoice; decline → deals rejected |
+| `PUT /api/me/zcash-address` | creator | set the creator's shielded Unified Address (named in signed terms) |
+| `GET/PUT/DELETE /api/receiving-account` | creator (PUT) | connect a viewing key (`ufvk`, `birthday`, `consent`), show it, disconnect it |
+| `POST /api/campaigns/{id}/decision` | advertiser | accept → one fixed-fee invoice per creator; decline → deals rejected |
+| `GET /api/campaigns/{id}/payments` | advertiser | the campaign's invoices, a "pay all" ZIP-321 URI, open total, summary |
 | `GET /api/pay/{id}` | public | payment page data (no txids, no campaign terms) |
-| `GET /api/payments/invoices[/{id}]` | owner | invoices, detected notes, audit events |
-| `POST /api/payments/invoices/{id}/cancel` | owner | cancel an untouched invoice (not funding invoices) |
-| `POST /api/payments/links` | creator | payment link, forwarded to the creator after approval |
-| `GET /api/payments/payouts` | user | payouts to me |
-| `GET /api/campaigns/{id}/payouts` | advertiser | campaign payouts (creator addresses redacted) |
-| `GET /api/wallet/status` | user | backend, network, reachability (balance for admins) |
+| `GET /api/payments/invoices[/{id}]` | payer or recipient | invoices, detected notes, audit events |
+| `POST /api/payments/invoices/{id}/cancel` | owner | cancel an untouched invoice (not milestone invoices) |
+| `POST /api/payments/links` | creator | payment link, paid directly to the creator's account |
+| `GET /api/receipts[/{id}]` | payer, recipient, admin | receipts |
+| `GET /api/wallet/status` | user | scanner, network, tip, NU7, faucet, your address, receiving account |
 | `GET/PUT /api/agent/spending-policy` | advertiser | agent spending limits |
-| `GET /api/agent/credit`, `POST /api/agent/credit/topup` | advertiser | prepaid agent credit |
+| `GET /api/agent/credit`, `POST /api/agent/credit/topup` | advertiser | prepaid API credit (paid to the API seller) |
 | `POST /api/agent/spend-requests/{id}` | advertiser | approve / reject an agent payment |
-| `GET /api/influencers/premium-search` | advertiser | HTTP 402 demo |
+| `GET /api/influencers/premium-search` | advertiser | HTTP 402 |
 | `POST /api/agent/premium-search` | advertiser | agent pays the 402 from credit |
-| `GET /api/admin/payouts`, `POST …/{id}/decision`, `POST …/{id}/resolve` | admin | payout approval, unknown-outcome resolution |
-| `GET /api/admin/custody`, `/api/admin/payment-events`, `/api/admin/invoices` | admin | custody reconciliation, audit |
+| `GET /api/admin/scanner`, `/api/admin/payment-events`, `/api/admin/invoices` | admin | read-only scanner status and audit |
 | `POST /api/dev/payments/{id}/simulate`, `POST /api/dev/advance` | user, simulated mode only | simulated payment, clock |
 
 ## Deep dive
@@ -399,19 +497,19 @@ wallet answers exactly that way; only `test_zcash_live.py` can.
 Enforced by `models.DEAL_TRANSITIONS`; `DealService.save` refuses any other move.
 
 ```
-NEGOTIATING → AGREED → AWAITING_APPROVAL → AWAITING_FUNDING → FUNDING → FUNDED
- ├→ REJECTED     └→ BLOCKED (policy gate)    │                    │
- └→ ESCALATED                                 └──(invoice expired)─┴→ PAYMENT_EXPIRED
+NEGOTIATING → AGREED → AWAITING_APPROVAL → PAYMENT_REQUESTED → PAYMENT_PENDING → CONTENT_CREATION
+ ├→ REJECTED     └→ BLOCKED (policy gate)       │  (CPM-only deals go straight to CONTENT_CREATION)
+ └→ ESCALATED                                   └──(invoice expired, nothing seen)──→ PAYMENT_EXPIRED
 
-FUNDED → VERIFIED → FIXED_RELEASED → COMPLETED (performance decided, remainder refunded)
-  │         │  └→ DISPUTED
-  │         └→ PROOF_REJECTED (resubmit before the deadline)
-  └→ EXPIRED_REFUNDED (no valid proof by the deadline)
+CONTENT_CREATION → PROOF_SUBMITTED / VERIFIED → PERFORMANCE_DUE → COMPLETED (performance paid or waived)
+        │                │        └→ DISPUTED
+        │                └→ PROOF_REJECTED (resubmit before the deadline)
+        └→ UNDELIVERED (no valid proof by the deadline)
 
-ARCHIVED: deals left mid-payment by the removed EVM flow (migration 2)
+ARCHIVED: deals left in escrow states by migration 3, or mid-payment under the older EVM flow
 ```
 
-Creators are told to post only at `FUNDED`, and proofs are refused before then.
+Creators are told to post once the fixed fee is confirmed (`CONTENT_CREATION`). Proofs are refused before then.
 
 ### Configurable agents
 
@@ -456,11 +554,15 @@ legal advice, and no guarantee of compliance.**
 
 ### MCP server (what the LLM may touch)
 
-A read-only `zerveil` MCP server (streamable HTTP at `/mcp/`, or stdio). Tools: campaigns, deals, timelines, campaign
-spend, the influencer directory and profiles, and channel and video statistics. Signing, invoices and payouts are
-deliberately **not** tools.
+A read-only `zerveil` MCP server, served over streamable HTTP at `/mcp/` or over stdio. Its tools cover:
+- campaigns, deals and milestones, and timelines;
+- campaign spend: confirmed paid to creators, requested, and `held_by_zerveil: 0`;
+- the influencer directory and profiles;
+- channel and video statistics.
 
-## Project structure
+Signing, invoices and payments are deliberately **not** tools, and Zcash addresses are scrubbed from tool output.
+
+### Project structure
 
 ```
 src/zerveil/
@@ -470,40 +572,51 @@ src/zerveil/
   auth/              Google OAuth, sessions, Ed25519 agent keys and delegation
   compliance/        disclosure policies
   mcp_servers/       read-only MCP server
-  payments/          invoices, scanner, payout queue, credit, links, custody
-  policy/            terms / funding checks, terms signing
-  services/          context (wallet selection), deals, registry
+  payments/          invoices, receiving accounts, scanning, receipts, credit, links
+  policy/            terms and milestone checks, terms signing
+  services/          context (scanner selection), deals, registry
   store/             PostgreSQL + in-memory stores, migrations
   verifier/          YouTube checks, content agent
-  zcash/             Zallet RPC wallet, simulated wallet, UA / ZIP-321 / memo / amounts
-web/                 React + TypeScript + Vite frontend
+  zcash/             scanner protocol, zcash-devtool and simulated scanners, UA/UFVK, ZIP-321, memo, amounts
+web/                 React + TypeScript + Vite frontend (plain CSS)
 tests/               see "Tests: mocked vs real"
 ```
 
 ## Status and blockers
 
 **Done:**
-- The HSP/HashKey/EVM payment path was removed: no Solidity, no EVM escrow, no EIP-712/EIP-3009, no web3.
-- Zcash invoices, scanner, payout queue, credit, 402, payment links, admin approval, migrations, UI and docs.
-- The full flow is tested end to end with the simulated wallet. The Zallet client is tested against a mocked RPC.
+- **Escrow removed.**
+  - Gone: the operator wallet, funding invoice, payout queue, refunds and custody view.
+  - Gone: the `ZCASH_ESCROW_*` settings and the escrow routes, UI and tests.
+  - Old data is preserved by migration 3.
+- **Direct payments:**
+  - per-creator milestone invoices and a "pay all" ZIP-321 request;
+  - viewing-key receiving accounts;
+  - scanner states and receipts;
+  - payment links paid to the creator, and the 402 paid to the API seller.
+- **zcash-devtool scanner backend**, with NU7 status reporting and fail-closed configuration.
+- **Tests:** end to end with the simulated scanner, and the devtool backend against a stubbed subprocess.
 
 **Not done / blockers:**
-- **No real testnet transaction has been executed by this project yet.** The environment it was built in had no
-  synced Zebra node, no Zallet wallet and no TAZ. There is therefore **no testnet txid to show**. To produce one,
-  follow [Connect a Zcash testnet wallet](#connect-a-zcash-testnet-wallet) and run `tests/test_zcash_live.py` with
-  `ZCASH_LIVE_SEND=1`.
-- Zallet is still evolving. Its RPC differs from zcashd in places, and `zcash/rpc.py` parses both shapes
-  defensively. Verify against the Zallet version you run.
-- The escrow is custodial. Making it trust-minimized, for example with multisig/FROST-controlled spending, is future
-  work.
-- Viewing-key based auditing (sharing an incoming viewing key with an auditor) is not implemented.
+- **This project has not yet executed or observed a real testnet transaction, so there is no txid to show.** The build
+  environment had no Rust toolchain (to build zcash-devtool), no Docker, and no testnet wallet or TAZ. To produce one,
+  follow [Real testnet setup](#real-testnet-setup) and run `tests/test_zcash_live.py`.
+- The `zcash-devtool` output parser is built from its source. It has not yet been checked against a live binary.
+- Migration 3 has not been run against a real PostgreSQL database by this project, because `TEST_DATABASE_URL` was not
+  available. Back up the database before the first start.
+- Disconnecting a receiving account does not yet delete the key from the scanner's wallet directory. The operator
+  must run `zcash-devtool wallet -w <dir> delete-account <uuid>`.
+- Nothing protects against non-delivery after an upfront fixed fee. This is inherent to non-custodial payments.
 
 ## References
 
-- Zcash protocol and Unified Addresses (ZIP-316): https://zips.z.cash/zip-0316
+- Zcash Improvement Proposals (including NU7 deployment): https://zips.z.cash/
+- ZIP-316 Unified Addresses and viewing keys: https://zips.z.cash/zip-0316
 - ZIP-321 payment request URIs: https://zips.z.cash/zip-0321
 - ZIP-317 proportional fees: https://zips.z.cash/zip-0317
-- Zallet: https://zcash.github.io/zallet/ (RPC compatibility: https://zcash.github.io/zallet/zcashd/rpc_status.html)
-- Zebra: https://zebra.zfnd.org/
+- zcash-devtool: https://github.com/zcash/zcash-devtool
+- Testnet lightwalletd: `testnet.zec.rocks:443`
+- Testnet faucet: https://zcash-faucet.vercel.app/
+- Zallet: https://zcash.github.io/zallet/
 - A2A protocol: https://a2a-protocol.org/
 - Model Context Protocol: https://modelcontextprotocol.io/

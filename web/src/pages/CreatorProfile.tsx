@@ -124,11 +124,11 @@ function ProfileBody({ p, isSelf }: { p: CreatorProfileView; isSelf: boolean }) 
           )}
         </Card>
 
-        <Card title="Agent and payouts">
+        <Card title="Agent and payments">
           <dl className="kv">
             <dt>Agent signing key</dt>
             <dd>
-              <Address value={who.agent_signer} /> <span className="muted small">authorized when the creator saved their payout address</span>
+              <Address value={who.agent_signer} /> <span className="muted small">authorized when the creator saved their shielded address</span>
             </dd>
             <dt>A2A Agent Card</dt>
             <dd>

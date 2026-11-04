@@ -1,70 +1,62 @@
-"""REAL Zcash testnet checks against a running Zallet (or zcashd-compatible) wallet. Skipped unless configured:
+"""REAL Zcash testnet checks against the actual zcash-devtool binary and a public lightwalletd server.
 
-    ZCASH_LIVE_RPC_URL        e.g. http://127.0.0.1:28232 (keep the RPC on loopback or a tunnel)
-    ZCASH_LIVE_RPC_USER / ZCASH_LIVE_RPC_PASSWORD   if the wallet's RPC needs basic auth
-    ZCASH_LIVE_ACCOUNT        the escrow account (UUID or number)
-    ZCASH_LIVE_FROM_ADDRESS   a Unified Address of that account (the payout source)
+Skipped unless you configure them, because they need software and keys this repository cannot provide:
 
-Read-only by default. To also send 0.0001 TAZ to an address of your own and wait for the wallet to see it:
+    ZCASH_LIVE_DEVTOOL_BIN    path to a zcash-devtool built from main (NU7 cohort)
+    ZCASH_LIVE_WALLET_DIR     an empty or existing directory for the view-only wallet (kept between runs)
+    ZCASH_LIVE_UFVK           Unified Full Viewing Key (uviewtest1…) of YOUR OWN testnet receiving account
+    ZCASH_LIVE_BIRTHDAY       block height to scan from (the account's creation height)
+    ZCASH_LIVE_LIGHTWALLETD   default https://testnet.zec.rocks:443
+    ZCASH_LIVE_EXPECT_TXID    optional: a txid you sent to an address of that account (e.g. from the faucet)
 
-    ZCASH_LIVE_SEND=1  ZCASH_LIVE_SEND_TO=utest1...
+Nothing here sends ZEC, claims faucet funds or touches a spending key. Results are reported as they are: a test that
+cannot reach the server fails; it never falls back to simulation.
+"""
 
-Nothing here runs in CI; every other test uses the simulated wallet or a mocked RPC transport."""
-
-import asyncio
 import os
-from decimal import Decimal
 
 import pytest
 
-from zerveil.zcash.address import is_unified_address
-from zerveil.zcash.memo import memo_for
-from zerveil.zcash.rpc import ZalletRpcWallet
+from zerveil.zcash.address import unified_address_problem, viewing_key_problem
+from zerveil.zcash.devtool import NU7_ACTIVATION, DevtoolScanner, server_arg
 
-URL = os.environ.get("ZCASH_LIVE_RPC_URL", "")
-pytestmark = pytest.mark.skipif(not URL, reason="ZCASH_LIVE_RPC_URL not set: no real Zcash wallet to test against")
+BIN = os.environ.get("ZCASH_LIVE_DEVTOOL_BIN", "")
+DIR = os.environ.get("ZCASH_LIVE_WALLET_DIR", "")
+UFVK = os.environ.get("ZCASH_LIVE_UFVK", "")
+BIRTHDAY = int(os.environ.get("ZCASH_LIVE_BIRTHDAY", "0") or 0)
+SERVER = server_arg(os.environ.get("ZCASH_LIVE_LIGHTWALLETD", "https://testnet.zec.rocks:443"))
 
-
-@pytest.fixture
-async def wallet():
-    w = ZalletRpcWallet(URL, network="testnet", account=os.environ.get("ZCASH_LIVE_ACCOUNT", "0"),
-                        from_address=os.environ.get("ZCASH_LIVE_FROM_ADDRESS", ""), user=os.environ.get("ZCASH_LIVE_RPC_USER", ""),
-                        password=os.environ.get("ZCASH_LIVE_RPC_PASSWORD", ""))  # fmt: skip
-    yield w
-    await w.aclose()
+pytestmark = pytest.mark.skipif(not (BIN and DIR), reason="real testnet: set ZCASH_LIVE_DEVTOOL_BIN and ZCASH_LIVE_WALLET_DIR")
 
 
-async def test_live_wallet_is_reachable(wallet):
-    info = await wallet.info()
+def scanner() -> DevtoolScanner:
+    return DevtoolScanner(binary=BIN, wallet_dir=DIR, server=SERVER, network="testnet", sync_every_seconds=0)
+
+
+async def test_live_lightwalletd_is_testnet_past_nu7():
+    info = await scanner().info()
     assert info.reachable, info.detail
-    print(f"escrow balance: {info.escrow_balance} TAZ")
+    assert info.chain_name == "test", info.chain_name
+    assert info.tip_height is not None and info.tip_height >= NU7_ACTIVATION["testnet"], info.tip_height
+    assert info.nu7_active is True
 
 
-async def test_live_invoice_address_is_a_fresh_shielded_ua(wallet):
-    a, b = await wallet.new_invoice_address(), await wallet.new_invoice_address()
-    assert a != b and is_unified_address(a, "testnet") and is_unified_address(b, "testnet")
-    assert await wallet.validate_address(a) is None
+@pytest.mark.skipif(not UFVK, reason="set ZCASH_LIVE_UFVK (your own testnet receiving account's viewing key)")
+async def test_live_import_viewing_key_and_derive_addresses():
+    assert viewing_key_problem(UFVK, "testnet") is None
+    s = scanner()
+    account = await s.import_viewing_key("zerveil-live-test", UFVK, BIRTHDAY)
+    assert await s.import_viewing_key("zerveil-live-test", UFVK, BIRTHDAY) == account  # idempotent
+    a, b = await s.new_address(account), await s.new_address(account)
+    assert a != b and unified_address_problem(a, "testnet") is None and a.startswith("utest1")
 
 
-async def test_live_scan_reads_notes(wallet):
-    notes = await wallet.received([await wallet.new_invoice_address()])
-    assert notes == []  # a brand-new address has received nothing
-
-
-@pytest.mark.skipif(os.environ.get("ZCASH_LIVE_SEND") != "1", reason="ZCASH_LIVE_SEND=1 not set: no TAZ is sent")
-async def test_live_shielded_send_and_outgoing_memo(wallet):
-    to = os.environ["ZCASH_LIVE_SEND_TO"]
-    memo = memo_for("PO-livetest01")
-    result = await wallet.send(to, Decimal("0.0001"), memo)
-    txids = result.txids
-    for _ in range(60):
-        if txids:
-            break
-        op = await wallet.operation(result.operation_id)
-        assert op.status not in ("failed", "cancelled"), op.error
-        txids = op.txids
-        await asyncio.sleep(5)
-    assert txids, "the wallet did not report a txid within 5 minutes"
-    print(f"testnet txid: {txids[0]}")
-    tx = await wallet.transaction(txids[0])
-    assert tx is not None and memo in tx.outgoing_memos
+@pytest.mark.skipif(not (UFVK and os.environ.get("ZCASH_LIVE_EXPECT_TXID")), reason="set ZCASH_LIVE_EXPECT_TXID to a payment you made")
+async def test_live_scanner_sees_a_real_payment():
+    s = scanner()
+    account = await s.import_viewing_key("zerveil-live-test", UFVK, BIRTHDAY)
+    notes = await s.received(account, [])
+    txid = os.environ["ZCASH_LIVE_EXPECT_TXID"].lower()
+    mine = [n for n in notes if n.txid == txid]
+    assert mine, f"txid {txid} not among {len(notes)} received notes"
+    print({"txid": txid, "pools": sorted({n.pool for n in mine}), "confirmations": max(n.confirmations for n in mine)})

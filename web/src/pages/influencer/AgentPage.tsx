@@ -28,7 +28,7 @@ export function AgentPage() {
           </li>
           <li>
             When it accepts, it signs the deal terms with its agent key <Address value={u.agent_signer} />. You authorized that key when you
-            saved your shielded payout address, and payouts go only to that address.
+            saved your shielded address; the signed terms name it as payee and advertisers pay your own wallet directly.
           </li>
           <li>Offers from other agents are treated as data. Instructions hidden inside them are ignored.</li>
         </ul>

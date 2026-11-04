@@ -130,7 +130,7 @@ async def test_advertiser_escalation_threshold_hands_counters_to_a_human(onboard
     deals = await by_influencer(adv, cid)
     assert deals["raj"]["state"] == "ESCALATED" and "advertiser review" in deals["raj"]["negotiation_outcome"]
     assert deals["ava"]["state"] == "AWAITING_APPROVAL"  # accepted the opening offer: nothing to escalate
-    assert (await adv.get(f"/api/campaigns/{cid}")).json()["funding"]["reserved"] == "80.00"  # escalations reserve nothing
+    assert (await adv.get(f"/api/campaigns/{cid}")).json()["payments"]["reserved"] == "80.00"  # escalations reserve nothing
     await adv.aclose()
 
 
@@ -158,13 +158,13 @@ async def test_disclosure_gate_at_campaign_creation(onboarded):
 
 
 async def fund(app, adv, cid):
-    """Approve the agreements and pay the funding invoice with the simulated wallet."""
+    """Accept the agreements and pay each creator's fixed-fee invoice (MOCKED: simulated scanner)."""
     res = await adv.post(f"/api/campaigns/{cid}/decision", json={"approved": True})
     assert res.status_code == 200, res.text
     await app.state.zx.runner.wait_idle()
-    invoice = (await adv.get(f"/api/campaigns/{cid}")).json()["funding_invoices"][0]
-    res = await adv.post(f"/api/dev/payments/{invoice['id']}/simulate", json={})
-    assert res.status_code == 200 and res.json()["status"] == "paid", res.text
+    for invoice in (await adv.get(f"/api/campaigns/{cid}")).json()["payment_invoices"]:
+        res = await adv.post(f"/api/dev/payments/{invoice['id']}/simulate", json={})
+        assert res.status_code == 200 and res.json()["status"] == "confirmed", res.text
 
 
 async def test_compliance_review_gates_the_fixed_fee(onboarded):
@@ -186,7 +186,7 @@ async def test_compliance_review_gates_the_fixed_fee(onboarded):
     assert (await ava.post(f"/api/deals/{deal_id}/compliance/review", json={"approved": True})).status_code == 403  # advertisers only
 
     assert (await adv.post(f"/api/deals/{deal_id}/compliance/review", json={"approved": True, "note": "label + on-screen ok"})).status_code == 200
-    assert (await adv.get(f"/api/deals/{deal_id}")).json()["state"] == "FIXED_RELEASED"
+    assert (await adv.get(f"/api/deals/{deal_id}")).json()["state"] == "PERFORMANCE_DUE"
     for c in (adv, ava):
         await c.aclose()
 
@@ -206,9 +206,11 @@ async def test_cpm_only_campaign_pays_performance_only(onboarded):
     await adv.post("/api/dev/advance", json={"hours": 49})
     await adv.post("/api/dev/advance", json={"hours": 24 * 7})
     done = (await adv.get(f"/api/deals/{d['id']}")).json()
-    assert done["state"] == "COMPLETED"
-    kinds = {p["kind"]: Decimal(p["amount"]) for p in done["payouts"]}
-    assert "fixed" not in kinds and kinds["performance"] == (Decimal(6_000) / 1000 * Decimal(d["terms"]["cpm"])).quantize(Decimal("0.01"))
+    kinds = {m["kind"]: m for m in done["milestones"]}
+    assert "fixed" not in kinds and Decimal(kinds["performance"]["amount"]) == (Decimal(6_000) / 1000 * Decimal(d["terms"]["cpm"])).quantize(Decimal("0.01"))
+    assert done["state"] == "PERFORMANCE_DUE" and kinds["performance"]["status"] == "requested"
+    await adv.post(f"/api/dev/payments/{kinds['performance']['invoice_id']}/simulate", json={})
+    assert (await adv.get(f"/api/deals/{d['id']}")).json()["state"] == "COMPLETED"
     for c in (adv, ava):
         await c.aclose()
 
@@ -226,7 +228,7 @@ async def test_payment_is_bound_to_the_approved_terms_hash(onboarded):
     await store.save_deal(target)
     res = await adv.post(f"/api/campaigns/{cid}/decision", json={"approved": True})
     assert res.status_code == 400 and "terms changed" in res.json()["detail"]
-    assert (await adv.get(f"/api/campaigns/{cid}")).json()["funding_invoices"] == []  # nothing to pay
+    assert (await adv.get(f"/api/campaigns/{cid}")).json()["payment_invoices"] == []  # nothing to pay
     await adv.aclose()
 
 

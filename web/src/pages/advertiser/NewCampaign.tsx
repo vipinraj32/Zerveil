@@ -203,20 +203,15 @@ export function NewCampaign() {
     }
   }
 
-  const maxEscrow = Number(form.cap_per_creator || 0) * form.max_creators;
+  const maxSpend = Number(form.cap_per_creator || 0) * form.max_creators;
   const lengthCap = form.deliverable === "youtube_short" ? SHORTS_MAX_SECONDS : MAX_VIDEO_SECONDS;
 
   return (
     <div className="stack narrow">
       <h1>New campaign</h1>
-      {!user.zcash_address && (
-        <Notice tone="warn">
-          Add a shielded refund address before creating a campaign: unused funds are refunded there. <Link to="/account">Add it in Account</Link>
-        </Notice>
-      )}
       <p className="muted small">
-        The budget must stay within your agent's <Link to="/advertiser/payments">spending limits</Link> (max campaign budget). Campaigns are funded later,
-        with one shielded Zcash invoice, once you approve the agreed deals.
+        The budget must stay within your agent's <Link to="/advertiser/payments">spending limits</Link> (max campaign budget). The budget is a spending limit, not a deposit: once you
+        accept the agreed deals, you pay each creator directly from your own Zcash wallet.
       </p>
       <Card title="Campaign">
         <label className="form">
@@ -458,7 +453,7 @@ export function NewCampaign() {
               </label>
             )}
           </div>
-          <p className="small muted">Up to {zec(maxEscrow)} in escrow. You approve each deal; unspent funds are refunded to your shielded refund address.</p>
+          <p className="small muted">At most {zec(maxSpend)} across all creators. You accept each deal, then pay each creator directly; nothing is paid in advance.</p>
         </Card>
 
         <div className="row">

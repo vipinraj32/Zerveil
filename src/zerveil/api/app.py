@@ -63,7 +63,7 @@ from ..verifier.channels import summarize
 from ..verifier.content import suggest_checks
 from ..verifier.youtube import parse_video_id
 from ..zcash.address import unified_address_problem
-from ..zcash.wallet import WalletUnavailable, ZcashWallet
+from ..zcash.wallet import PaymentScanner, WalletUnavailable
 from .payments import register_payment_routes
 
 log = logging.getLogger(__name__)
@@ -141,7 +141,7 @@ class ChecksSuggestIn(BaseModel):
 
 
 class Decision(BaseModel):
-    approved: bool  # approve the agreements and request one shielded funding invoice, or reject them
+    approved: bool  # accept the agreements and request each creator's fixed fee (paid directly to them), or reject them
 
 
 class ProofIn(BaseModel):
@@ -300,10 +300,10 @@ def create_app(
     settings: Settings | None = None,
     http_factory: Callable[[FastAPI], httpx.AsyncClient] | None = None,
     scheduler_interval: float | None = 3.0,
-    wallet: ZcashWallet | None = None,
+    wallet: PaymentScanner | None = None,
 ) -> FastAPI:
     """`http_factory` builds the client used for outbound A2A and MCP-tool calls (tests pass an in-process ASGI client).
-    `wallet` overrides the wallet chosen from settings (tests pass a simulated or mocked-RPC wallet)."""
+    `wallet` overrides the payment scanner chosen from settings (tests pass a simulated or mocked scanner)."""
     settings = settings or get_settings()
     ephemeral_secret = not settings.session_secret
     if ephemeral_secret:
@@ -335,6 +335,11 @@ def create_app(
             if ephemeral_secret:
                 state.ctx.warnings.append("SESSION_SECRET not set: sign-ins and influencer agent keys reset on restart")
             state.deals = DealService(state.ctx)
+            try:  # the API seller's receiving account (HTTP 402 and API credit are paid to it)
+                if await state.deals.payments.ensure_api_seller() is None:
+                    state.ctx.warnings.append("ZCASH_API_SELLER_UFVK not set: premium search (HTTP 402) and API credit cannot be paid")
+            except Exception as e:  # noqa: BLE001 - a scanner outage must not stop the server
+                state.ctx.warnings.append(f"API seller receiving account unavailable: {e}")
             state.runner = CampaignRunner(state.deals, await _checkpointer(settings, stack))
             await state.runner.recover()  # campaigns a previous process left mid-negotiation continue with their next creator
             state.assistant = Assistant(llm, f"{base}/mcp/") if llm is not None else None
@@ -364,8 +369,8 @@ def create_app(
 
     @app.exception_handler(WalletUnavailable)
     async def wallet_unavailable(_: Request, e: WalletUnavailable) -> JSONResponse:
-        log.warning("wallet unavailable: %s", e)
-        return JSONResponse({"detail": "The Zcash wallet is unreachable right now. Nothing was sent; try again shortly."}, status_code=503)
+        log.warning("payment scanner unavailable: %s", e)
+        return JSONResponse({"detail": "The Zcash payment scanner is unreachable right now. Payments are not affected; try again shortly."}, status_code=503)
 
     @app.exception_handler(psycopg.OperationalError)
     async def database_unavailable(request: Request, e: psycopg.OperationalError) -> JSONResponse:
@@ -512,7 +517,7 @@ def create_app(
             out["agent_url"] = state.ctx.registry.agent_url(user.id)
             out["agent_listed"] = state.ctx.registry.listed(user) is not None
         else:
-            out["profile_complete"] = bool(user.zcash_address and user.company and user.brand_handle)
+            out["profile_complete"] = bool(user.company and user.brand_handle)
         return out
 
     def authorize_agent(user: User) -> None:
@@ -577,14 +582,13 @@ def create_app(
 
     @app.put("/api/me/zcash-address")
     async def set_zcash_address(body: ZcashAddressIn, user: CurrentUser) -> dict[str, Any]:
-        """The user's shielded Unified Address: creators are paid to it, advertisers are refunded to it. Checked for
-        format and network here, then by the wallet (it must hold an Orchard or Sapling receiver)."""
+        """The user's own shielded Unified Address (utest1… on testnet), from their own wallet. Creators sign terms
+        naming it as payee; milestone invoices are paid to fresh addresses of the same wallet account. Format and network
+        are checked here. Zerveil never receives or holds funds."""
         if user.role == "influencer" and user.channel is None:
             raise HTTPException(409, "connect your YouTube channel first")
         address = body.address.strip()
         problem = unified_address_problem(address, settings.zcash_network)  # type: ignore[arg-type]
-        if problem is None:
-            problem = await state.ctx.wallet.validate_address(address)
         if problem:
             raise HTTPException(400, problem)
         user.zcash_address = address
@@ -601,7 +605,7 @@ def create_app(
 
     @app.get("/api/status")
     async def status() -> dict[str, Any]:
-        """Public: what the browser needs to label payments. Never the wallet RPC URL or credentials."""
+        """Public: what the browser needs to label payments. Never scanner paths, keys or credentials."""
         ctx = state.ctx
         return {
             "app_name": settings.app_name,
@@ -611,10 +615,11 @@ def create_app(
                 "network": settings.zcash_network,
                 "ticker": settings.ticker,
                 "wallet_backend": ctx.wallet.name,
+                "direct_payments": True,  # paid straight to the recipient's wallet; Zerveil holds no funds
                 "confirmations_required": settings.zcash_confirmation_threshold,
-                "fee_reserve_per_deal": str(settings.zcash_fee_reserve_per_deal),
-                "payout_approval_required": settings.payout_approval_required,
                 "explorer_tx_url": settings.zcash_explorer_tx_url,
+                "faucet_url": settings.zcash_faucet_url if settings.zcash_network == "testnet" else None,
+                "testnet_notice": "Zcash Testnet — TAZ — No real monetary value" if settings.zcash_network == "testnet" else None,
             },
             "premium_search_price": str(settings.premium_search_price),
             "verifier_online": ctx.videos is not None,
@@ -641,8 +646,6 @@ def create_app(
 
     @app.post("/api/campaigns", status_code=201)
     async def create_campaign(body: CampaignCreate, user: AdvertiserUser, request: Request) -> dict[str, Any]:
-        if not user.zcash_address:
-            raise HTTPException(409, "add your shielded refund address first: unspent escrow is returned to it")
         limits = await state.deals.payments.spending_policy(user.id)
         if limits.enabled and body.budget > limits.max_campaign_budget:
             raise HTTPException(400, f"budget {body.budget} is above your agent's campaign limit {limits.max_campaign_budget} (Settings → Spending limits)")
@@ -670,7 +673,7 @@ def create_app(
             raise HTTPException(409, "this campaign is already being started")
         if body.name.casefold() in taken:
             raise HTTPException(409, f"you already have a campaign named “{body.name}”: pick another name")
-        campaign = await state.runner.start(CampaignSpec(**body.model_dump(), **snapshot, id=spec_id, owner_id=user.id, refund_address=user.zcash_address))
+        campaign = await state.runner.start(CampaignSpec(**body.model_dump(), **snapshot, id=spec_id, owner_id=user.id))
         return campaign.model_dump(mode="json")
 
     @app.get("/api/campaigns/{campaign_id}/negotiations")
@@ -732,9 +735,9 @@ def create_app(
         c = await readable_campaign(campaign_id, who)
         pending = await state.runner.pending_approval(campaign_id)
         payments = state.deals.payments
-        invoices = [payments.payment_request(i) for i in await state.ctx.store.list_invoices(campaign_id=campaign_id, purpose="campaign_funding")]
-        funding = await state.deals.funding_summary(campaign_id)
-        return {**c.model_dump(mode="json"), "pending_approval": pending, "funding_invoices": invoices, "funding": funding}
+        invoices = [payments.payment_request(i) for i in await state.ctx.store.list_invoices(campaign_id=campaign_id, purpose="milestone")]
+        summary = await state.deals.payment_summary(campaign_id)
+        return {**c.model_dump(mode="json"), "pending_approval": pending, "payment_invoices": invoices, "payments": summary}
 
     @app.get("/api/campaigns/{campaign_id}/deals")
     async def campaign_deals(campaign_id: str, who: Principal) -> list[dict[str, Any]]:
@@ -769,9 +772,11 @@ def create_app(
     async def get_deal(deal_id: str, who: Principal) -> dict[str, Any]:
         deal = await readable_deal(deal_id, who)
         out = deal_json(deal, who)
-        out["payout_requests"] = [p.model_dump(mode="json", exclude={"evidence"}) for p in await state.ctx.store.list_payouts(deal_id=deal.id)]
-        if deal.funding_invoice_id and (inv := await state.ctx.store.get_invoice(deal.funding_invoice_id)):
-            out["funding_invoice"] = inv.public()
+        invoices = []
+        for m in deal.milestones:
+            if m.invoice_id and (inv := await state.ctx.store.get_invoice(m.invoice_id)):
+                invoices.append({**state.deals.payments.payment_request(inv), "milestone_id": m.id, "kind": m.kind, "receipt_id": inv.receipt_id})
+        out["milestone_invoices"] = invoices
         return out
 
     @app.get("/api/deals/{deal_id}/events")
@@ -1051,7 +1056,7 @@ def create_app(
                 continue
             if not (who == OPERATOR or (isinstance(who, User) and who.id in (c.spec.owner_id, influencer_id))):
                 continue
-            paid = sum((p.amount for p in d.payouts if p.kind != "refund"), Decimal(0))
+            paid = sum((m.amount for m in d.milestones if m.status == "confirmed"), Decimal(0))
             terms = d.terms.model_dump(mode="json", include={"compensation_model", "fixed_fee", "cpm", "cap", "publish_by"}) if d.terms else None
             out.append({
                 "deal_id": d.id,
@@ -1111,6 +1116,7 @@ def create_app(
                 "niche_source": creator.niche_source,
                 "niche_analysis": creator.niche_analysis.model_dump(mode="json") if creator.niche_analysis else None,
                 "has_payout_address": bool(creator.zcash_address),
+                "receiving_account_connected": bool(creator.receiving_account_id),
                 "agent_signer": creator.agent_signer,
                 "agent_active": creator.agent_active,
                 "listed": reg is not None,
@@ -1242,7 +1248,7 @@ def create_app(
         log.info("%s advanced the clock by %sh (%d actions)", user.email, body.hours, actions)
         return {"clock_offset_hours": state.ctx.clock.offset_hours, "actions": actions}
 
-    # ---- Zcash payments: invoices, payment links, payouts, agent credit, HTTP 402 -----------------------
+    # ---- Zcash payments (direct): invoices, receipts, payment links, viewing keys, API credit, HTTP 402 -----
 
     register_payment_routes(app, state, principal=current_user, advertiser=advertiser, is_admin=is_admin, readable_campaign=readable_campaign)
 

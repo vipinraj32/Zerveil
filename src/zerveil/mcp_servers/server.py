@@ -47,7 +47,7 @@ def build_mcp(api_base: str, http: httpx.AsyncClient | None = None, streamable_h
     mcp = FastMCP(
         "zerveil",
         instructions=(
-            "Read-only access to Zerveil influencer campaigns (deals, negotiation history, payments, proofs, payouts)"
+            "Read-only access to Zerveil influencer campaigns (deals, negotiation history, direct payments, proofs, milestones)"
             " and to creators' public YouTube data (channel stats, recent uploads, engagement, comments)."
         ),
         streamable_http_path=streamable_http_path,
@@ -77,7 +77,7 @@ def build_mcp(api_base: str, http: httpx.AsyncClient | None = None, streamable_h
 
     @mcp.tool()
     async def list_deals(campaign_id: str, ctx: Context) -> list[dict[str, Any]]:
-        """Deals of a campaign: influencer, state, agreed amounts and payouts."""
+        """Deals of a campaign: influencer, state, agreed amounts and payment milestones."""
         return [
             {
                 "deal_id": d["id"],
@@ -86,29 +86,29 @@ def build_mcp(api_base: str, http: httpx.AsyncClient | None = None, streamable_h
                 "fixed_fee": d["terms"]["fixed_fee"] if d.get("terms") else None,
                 "cpm": d["terms"]["cpm"] if d.get("terms") else None,
                 "cap": d["terms"]["cap"] if d.get("terms") else None,
-                "paid_out": [{"kind": p["kind"], "amount": p["amount"]} for p in d.get("payouts", [])],
+                "milestones": [{"kind": m["kind"], "amount": m["amount"], "status": m["status"]} for m in d.get("milestones", [])],
             }
             for d in await get(f"/api/campaigns/{campaign_id}/deals", ctx)
         ]
 
     @mcp.tool()
     async def get_deal(deal_id: str, ctx: Context) -> dict[str, Any]:
-        """Full deal record: negotiation rounds, signed terms, funding invoice, proof checks, payout decisions."""
+        """Full deal record: negotiation rounds, signed terms, payment milestones, proof checks."""
         return await get(f"/api/deals/{deal_id}", ctx)
 
     @mcp.tool()
     async def get_deal_timeline(deal_id: str, ctx: Context) -> list[dict[str, Any]]:
-        """Audit log of one deal in order: who did what (agents, policy, wallet, verifier, escrow)."""
+        """Audit log of one deal in order: who did what (agents, policy, scanner, verifier, payments)."""
         return await get(f"/api/deals/{deal_id}/events", ctx)
 
     @mcp.tool()
     async def campaign_spend(campaign_id: str, ctx: Context) -> dict[str, str]:
-        """ZEC held in the escrow account, decided for creators, and refunded for a campaign (payout decisions; delivery status is in the payout queue)."""
+        """ZEC requested from the advertiser and confirmed paid directly to creators' wallets for a campaign. Zerveil holds nothing."""
         deals = await get(f"/api/campaigns/{campaign_id}/deals", ctx)
-        locked = sum((Decimal(d["terms"]["cap"]) for d in deals if d.get("funded_at") and d.get("terms")), Decimal(0))
-        paid = sum((Decimal(p["amount"]) for d in deals for p in d.get("payouts", []) if p["kind"] != "refund"), Decimal(0))
-        refunded = sum((Decimal(p["amount"]) for d in deals for p in d.get("payouts", []) if p["kind"] == "refund"), Decimal(0))
-        return {"locked_total": str(locked), "paid_to_creators": str(paid), "refunded": str(refunded), "in_escrow": str(locked - paid - refunded)}
+        milestones = [m for d in deals for m in d.get("milestones", [])]
+        confirmed = sum((Decimal(m["amount"]) for m in milestones if m["status"] == "confirmed"), Decimal(0))
+        open_ = sum((Decimal(m["amount"]) for m in milestones if m["status"] in ("requested", "pending")), Decimal(0))
+        return {"confirmed_paid_to_creators": str(confirmed), "requested_not_confirmed": str(open_), "held_by_zerveil": "0"}
 
     @mcp.tool()
     async def get_video_stats(video: str, ctx: Context) -> dict[str, Any]:

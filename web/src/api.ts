@@ -1,4 +1,4 @@
-import type { AgentLesson, AgentPerformance, FeedbackInput, NegotiationEvent, NegotiationFeedback, NegotiationProgress, NegotiationSession, AgentPolicy, AuditEvent, Campaign, CampaignDetail, CampaignInput, ComplianceView, ContentCheck, CreatorProfileView, Deal, DecisionRecord, DirectoryEntry, DisclosurePolicy, EvidenceItem, InfluencerDeal, Me, NegotiationView, NicheAnalysis, OwnerInvoice, PaymentRequest, PaymentRequired, PayoutRequest, PlatformStatus, PolicyResponse, PremiumSearchResult, SpendingPolicy, CreditSummary, AgentPremiumSearch, Custody, PaymentEvent, WalletStatus } from "./types";
+import type { AgentLesson, AgentPerformance, FeedbackInput, NegotiationEvent, NegotiationFeedback, NegotiationProgress, NegotiationSession, AgentPolicy, AuditEvent, Campaign, CampaignDetail, CampaignInput, ComplianceView, ContentCheck, CreatorProfileView, Deal, DecisionRecord, DirectoryEntry, DisclosurePolicy, EvidenceItem, InfluencerDeal, Me, NegotiationView, NicheAnalysis, OwnerInvoice, PaymentRequest, PaymentRequired, PlatformStatus, PolicyResponse, PremiumSearchResult, SpendingPolicy, CreditSummary, AgentPremiumSearch, PaymentEvent, WalletStatus, CampaignPayments, ReceivingAccountView, Receipt, ScannerStatus } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -48,7 +48,7 @@ export const api = {
   logout: () => post<{ status: string }>("/auth/logout"),
   loginUrl: (role: "advertiser" | "influencer") => `/auth/google/login?role=${role}`,
 
-  /** Shielded Unified Address: the creator's payout address or the advertiser's refund address. 400 if not a valid UA. */
+  /** The user's own shielded Unified Address (from their own wallet). 400 if not a valid UA for this network. */
   saveZcashAddress: (address: string) => put<Me>("/api/me/zcash-address", { address }),
   saveAdvertiser: (company: string, brand_handle: string) => put<Me>("/api/me/advertiser", { company, brand_handle }),
   saveInfluencer: (body: { niches: string[]; fixed_min: string; cpm_min: string; preferred_fixed: string; persona: string; agent_active: boolean }) =>
@@ -70,7 +70,8 @@ export const api = {
   cancelCampaignNegotiations: (id: string) => post<NegotiationProgress>(`/api/campaigns/${encodeURIComponent(id)}/negotiations/cancel`),
   parseBrief: (brief: string) => post<CampaignInput>("/api/campaigns/parse-brief", { brief }),
   decide: (id: string, approved: boolean) => post<{ status: string }>(`/api/campaigns/${encodeURIComponent(id)}/decision`, { approved }),
-  campaignPayouts: (id: string) => get<PayoutRequest[]>(`/api/campaigns/${encodeURIComponent(id)}/payouts`),
+  /** The campaign's milestone invoices, each paid directly to one creator's wallet, plus one ZIP-321 request for the open ones. */
+  campaignPayments: (id: string) => get<CampaignPayments>(`/api/campaigns/${encodeURIComponent(id)}/payments`),
 
   deal: (id: string) => get<Deal>(`/api/deals/${encodeURIComponent(id)}`),
   dealEvents: (id: string) => get<AuditEvent[]>(`/api/deals/${encodeURIComponent(id)}/events`),
@@ -113,8 +114,13 @@ export const api = {
   invoice: (id: string) => get<OwnerInvoice>(`/api/payments/invoices/${encodeURIComponent(id)}`),
   cancelInvoice: (id: string) => post<OwnerInvoice>(`/api/payments/invoices/${encodeURIComponent(id)}/cancel`),
   createPaymentLink: (body: { title: string; amount: string; description: string }) => post<OwnerInvoice>("/api/payments/links", body),
-  myPayouts: () => get<PayoutRequest[]>("/api/payments/payouts"),
   walletStatus: () => get<WalletStatus>("/api/wallet/status"),
+  receivingAccount: () => get<ReceivingAccountView>("/api/receiving-account"),
+  /** Creators only: connect a viewing key (never a seed phrase or spending key: those are refused with 400). */
+  connectReceivingAccount: (body: { ufvk: string; birthday: number; consent: boolean }) => put<ReceivingAccountView>("/api/receiving-account", body),
+  disconnectReceivingAccount: () => request<ReceivingAccountView>("DELETE", "/api/receiving-account"),
+  receipts: () => get<Receipt[]>("/api/receipts"),
+  receipt: (id: string) => get<Receipt>(`/api/receipts/${encodeURIComponent(id)}`),
   /** Dev only (simulated payments): pretend a shielded payment arrived. No ZEC moves. */
   simulatePayment: (id: string, body: { amount?: string; confirmations?: number } = {}) =>
     post<PaymentRequest>(`/api/dev/payments/${encodeURIComponent(id)}/simulate`, body),
@@ -143,12 +149,8 @@ export const api = {
     return { paid: parsed as PremiumSearchResult };
   },
 
-  adminPayouts: (status = "pending_approval,unknown,failed") => get<PayoutRequest[]>(`/api/admin/payouts?status=${encodeURIComponent(status)}`),
-  adminDecidePayout: (id: string, approved: boolean, note: string) =>
-    post<PayoutRequest>(`/api/admin/payouts/${encodeURIComponent(id)}/decision`, { approved, note }),
-  adminResolvePayout: (id: string, action: "resend" | "cancel", note: string) =>
-    post<PayoutRequest>(`/api/admin/payouts/${encodeURIComponent(id)}/resolve`, { action, note }),
-  custody: () => get<Custody>("/api/admin/custody"),
+  // ---- operators: read-only (operators cannot move funds; Zerveil holds none)
+  adminScanner: () => get<ScannerStatus>("/api/admin/scanner"),
   paymentEvents: () => get<PaymentEvent[]>("/api/admin/payment-events"),
   adminInvoices: () => get<OwnerInvoice[]>("/api/admin/invoices"),
 

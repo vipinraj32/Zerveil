@@ -240,7 +240,7 @@ export function NegotiationSummary({
           ))}
         </ul>
       )}
-      <p className="muted small">Agreed is not paid: each deal is funded only after you approve it and pay its shielded funding invoice.</p>
+      <p className="muted small">Agreed is not paid: each creator is paid only after you accept the deal and pay their payment request directly from your wallet.</p>
     </div>
   );
 }

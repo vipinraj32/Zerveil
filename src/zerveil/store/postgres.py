@@ -12,7 +12,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
 from ..models import AuditEvent, Campaign, Deal, User
-from ..payments.models import CreditEntry, Invoice, PaymentEvent, PayoutRequest, SpendRequest
+from ..payments.models import CreditEntry, Invoice, PaymentEvent, Receipt, ReceivingAccount, SpendRequest
 from .migrations import migrate
 
 log = logging.getLogger(__name__)
@@ -113,6 +113,12 @@ class PostgresStore:
                 "ON CONFLICT (id) DO UPDATE SET state = EXCLUDED.state, data = EXCLUDED.data, updated_at = now()",
                 (deal.id, deal.campaign_id, deal.state.value, Jsonb(deal.model_dump(mode="json"))),
             )
+            for m in deal.milestones:  # an index of the milestones held in the deal document
+                await conn.execute(
+                    "INSERT INTO deal_milestones (id, deal_id, kind, status, invoice_id) VALUES (%s, %s, %s, %s, %s) "
+                    "ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, invoice_id = EXCLUDED.invoice_id, updated_at = now()",
+                    (m.id, deal.id, m.kind, m.status, m.invoice_id),
+                )
 
     async def get_deal(self, deal_id: str) -> Deal | None:
         async with self.pool.connection() as conn:
@@ -388,10 +394,10 @@ class PostgresStore:
     async def save_invoice(self, invoice: Invoice) -> None:
         async with self.pool.connection() as conn:
             await conn.execute(
-                "INSERT INTO invoices (id, purpose, owner_id, campaign_id, address, status, created_at, data) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
-                "ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, data = EXCLUDED.data",
-                (invoice.id, invoice.purpose, invoice.owner_id, invoice.campaign_id, invoice.address, invoice.status, invoice.created_at,
-                 Jsonb(invoice.model_dump(mode="json"))),
+                "INSERT INTO invoices (id, purpose, owner_id, recipient_id, campaign_id, address, status, created_at, data) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, data = EXCLUDED.data",
+                (invoice.id, invoice.purpose, invoice.owner_id, invoice.recipient_id, invoice.campaign_id, invoice.address, invoice.status,
+                 invoice.created_at, Jsonb(invoice.model_dump(mode="json"))),
             )  # fmt: skip
 
     async def get_invoice(self, invoice_id: str) -> Invoice | None:
@@ -413,38 +419,48 @@ class PostgresStore:
             rows = await (await conn.execute(sql + " ORDER BY created_at DESC", params)).fetchall()
         return [Invoice.model_validate(r[0]) for r in rows]
 
-    async def save_payout(self, payout: PayoutRequest, expect_status: str | None = None) -> bool:
-        data = Jsonb(payout.model_dump(mode="json"))
+    async def save_receiving_account(self, account: ReceivingAccount) -> None:
         async with self.pool.connection() as conn:
-            if expect_status is None:
-                cur = await conn.execute(
-                    "INSERT INTO payout_requests (id, kind, status, deal_id, campaign_id, beneficiary_id, created_at, data) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, data = EXCLUDED.data",
-                    (payout.id, payout.kind, payout.status, payout.deal_id, payout.campaign_id, payout.beneficiary_id, payout.created_at, data),
-                )
-            else:  # compare-and-set: two workers can never both move a payout into `sending`
-                cur = await conn.execute("UPDATE payout_requests SET status = %s, data = %s WHERE id = %s AND status = %s",
-                                         (payout.status, data, payout.id, expect_status))  # fmt: skip
-            return cur.rowcount == 1
+            await conn.execute(
+                "INSERT INTO receiving_accounts (id, owner_id, role, authorized_at, revoked_at, data) VALUES (%s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (id) DO UPDATE SET revoked_at = EXCLUDED.revoked_at, data = EXCLUDED.data",
+                (account.id, account.owner_id, account.role, account.authorized_at, account.revoked_at, Jsonb(account.model_dump(mode="json"))),
+            )
 
-    async def get_payout(self, payout_id: str) -> PayoutRequest | None:
+    async def get_receiving_account(self, owner_id: str) -> ReceivingAccount | None:
         async with self.pool.connection() as conn:
-            row = await (await conn.execute("SELECT data FROM payout_requests WHERE id = %s", (payout_id,))).fetchone()
-        return PayoutRequest.model_validate(row[0]) if row else None
+            row = await (await conn.execute("SELECT data FROM receiving_accounts WHERE owner_id = %s ORDER BY authorized_at DESC LIMIT 1",
+                                            (owner_id,))).fetchone()  # fmt: skip
+        return ReceivingAccount.model_validate(row[0]) if row else None
 
-    async def list_payouts(self, *, status: set[str] | None = None, deal_id: str | None = None, beneficiary_id: str | None = None,
-                           campaign_id: str | None = None) -> list[PayoutRequest]:  # fmt: skip
-        sql, params = "SELECT data FROM payout_requests WHERE TRUE", []
-        for column, value in (("deal_id", deal_id), ("beneficiary_id", beneficiary_id), ("campaign_id", campaign_id)):
-            if value is not None:
-                sql += f" AND {column} = %s"
-                params.append(value)
-        if status is not None:
-            sql += " AND status = ANY(%s)"
-            params.append(list(status))
+    async def get_receiving_account_by_id(self, account_id: str) -> ReceivingAccount | None:
         async with self.pool.connection() as conn:
-            rows = await (await conn.execute(sql + " ORDER BY created_at DESC", params)).fetchall()
-        return [PayoutRequest.model_validate(r[0]) for r in rows]
+            row = await (await conn.execute("SELECT data FROM receiving_accounts WHERE id = %s", (account_id,))).fetchone()
+        return ReceivingAccount.model_validate(row[0]) if row else None
+
+    async def list_receiving_accounts(self) -> list[ReceivingAccount]:
+        async with self.pool.connection() as conn:
+            rows = await (await conn.execute("SELECT data FROM receiving_accounts ORDER BY authorized_at")).fetchall()
+        return [ReceivingAccount.model_validate(r[0]) for r in rows]
+
+    async def save_receipt(self, receipt: Receipt) -> None:
+        async with self.pool.connection() as conn:
+            await conn.execute(
+                "INSERT INTO payment_receipts (id, invoice_id, payer_id, recipient_id, issued_at, data) VALUES (%s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data",
+                (receipt.id, receipt.invoice_id, receipt.payer_id, receipt.recipient_id, receipt.issued_at, Jsonb(receipt.model_dump(mode="json"))),
+            )
+
+    async def get_receipt(self, receipt_id: str) -> Receipt | None:
+        async with self.pool.connection() as conn:
+            row = await (await conn.execute("SELECT data FROM payment_receipts WHERE id = %s", (receipt_id,))).fetchone()
+        return Receipt.model_validate(row[0]) if row else None
+
+    async def list_receipts(self, user_id: str) -> list[Receipt]:
+        async with self.pool.connection() as conn:
+            rows = await (await conn.execute("SELECT data FROM payment_receipts WHERE payer_id = %s OR recipient_id = %s ORDER BY issued_at DESC",
+                                             (user_id, user_id))).fetchall()  # fmt: skip
+        return [Receipt.model_validate(r[0]) for r in rows]
 
     async def add_credit(self, entry: CreditEntry) -> bool:
         async with self.pool.connection() as conn:

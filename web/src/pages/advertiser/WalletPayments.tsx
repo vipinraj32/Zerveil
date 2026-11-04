@@ -1,62 +1,19 @@
-// Advertiser wallet & payments: escrow wallet status, my shielded invoices, the agent's prepaid credit and spending
-// limits, its pending spend requests, and the HTTP 402 premium-search demo. All amounts are shielded Zcash.
+// Advertiser payments: network and scanner status, the payment requests I pay (each directly to the recipient's own
+// wallet), the agent's prepaid API credit and spending limits, its pending spend requests, and the HTTP 402
+// premium-search demo. All amounts are shielded Zcash. Zerveil holds no funds.
 
 import { useEffect, useState, type FormEvent } from "react";
 import { Link } from "react-router";
 import { api } from "../../api";
-import { InvoiceStatusChip, PrivacyNote, ShieldedCheckout, SimulatedChip } from "../../components/Payments";
+import { InvoiceStatusChip, PrivacyNote, ShieldedCheckout, SimulatedChip, TestnetNotice, WalletStatusPanel } from "../../components/Payments";
 import { ActionButton, Card, Empty, ErrorText, Notice, Spinner, Stat } from "../../components/ui";
 import { PURPOSE_LABEL, humanize, num, ticker, when, zec } from "../../format";
 import { useLiveEvents, useResource } from "../../live";
-import { useMe, useSession } from "../../session";
+import { useSession } from "../../session";
 import type { AgentPremiumSearch, OwnerInvoice, PaymentRequired, PremiumSearchResult, SpendingPolicy } from "../../types";
 
-function WalletCard() {
-  const wallet = useResource(api.walletStatus, "wallet-status");
-  const { user } = useMe();
-  const w = wallet.data;
-  return (
-    <Card title="Escrow wallet">
-      <ErrorText error={wallet.error} />
-      {!w ? (
-        <Spinner />
-      ) : (
-        <dl className="kv">
-          <dt>Network</dt>
-          <dd>
-            Zcash {w.network} <SimulatedChip simulated={w.simulated} />
-          </dd>
-          <dt>Backend</dt>
-          <dd>
-            {w.backend} · {w.reachable ? <span className="chip good">reachable</span> : <span className="chip warn">unreachable</span>}
-          </dd>
-          {w.escrow_balance != null && (
-            <>
-              <dt>Escrow balance</dt>
-              <dd>{zec(w.escrow_balance)}</dd>
-            </>
-          )}
-          <dt>Your refund address</dt>
-          <dd>
-            {w.your_address ? (
-              <span className="mono small" title={w.your_address}>
-                {w.your_address.slice(0, 14)}…{w.your_address.slice(-8)}
-              </span>
-            ) : (
-              <span className="muted">
-                not set · <Link to="/account">add one</Link>
-              </span>
-            )}
-          </dd>
-        </dl>
-      )}
-      {!user.zcash_address && <Notice tone="warn">Add a shielded refund address before you create a campaign.</Notice>}
-    </Card>
-  );
-}
-
 function InvoiceHistory({ invoices, onOpen }: { invoices: OwnerInvoice[]; onOpen: (id: string) => void }) {
-  if (invoices.length === 0) return <Empty>No invoices yet.</Empty>;
+  if (invoices.length === 0) return <Empty>No payment requests yet.</Empty>;
   return (
     <div className="table-scroll">
       <table className="table compact">
@@ -83,13 +40,8 @@ function InvoiceHistory({ invoices, onOpen }: { invoices: OwnerInvoice[]; onOpen
               </td>
               <td>{zec(i.amount)}</td>
               <td>
-                <InvoiceStatusChip status={i.status} />
+                <InvoiceStatusChip status={i.status} confirmations={i.confirmations} required={i.required_confirmations} />
                 <SimulatedChip simulated={i.simulated} />
-                {i.status === "confirming" && (
-                  <div className="muted small">
-                    {i.confirmations}/{i.required_confirmations} confirmations
-                  </div>
-                )}
               </td>
               <td className="small">{when(i.created_at)}</td>
               <td>
@@ -99,6 +51,14 @@ function InvoiceHistory({ invoices, onOpen }: { invoices: OwnerInvoice[]; onOpen
                 <Link className="small" to={`/pay/${encodeURIComponent(i.id)}`}>
                   pay page
                 </Link>
+                {i.receipt_id && (
+                  <>
+                    {" "}
+                    <Link className="small" to={`/receipts/${encodeURIComponent(i.receipt_id)}`}>
+                      receipt
+                    </Link>
+                  </>
+                )}
               </td>
             </tr>
           ))}
@@ -114,7 +74,7 @@ function InvoiceDetail({ id, onClose, onChange }: { id: string; onClose: () => v
   const i = inv.data;
   return (
     <Card
-      title={i ? i.title || PURPOSE_LABEL[i.purpose] : "Invoice"}
+      title={i ? i.title || PURPOSE_LABEL[i.purpose] : "Payment request"}
       actions={
         <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>
           Close
@@ -142,6 +102,7 @@ function InvoiceDetail({ id, onClose, onChange }: { id: string; onClose: () => v
                     <th>Amount</th>
                     <th>Pool</th>
                     <th>Confirmations</th>
+                    <th>Mined height</th>
                     <th>Memo matched</th>
                     <th>Seen</th>
                   </tr>
@@ -152,6 +113,7 @@ function InvoiceDetail({ id, onClose, onChange }: { id: string; onClose: () => v
                       <td>{zec(n.amount)}</td>
                       <td>{n.pool}</td>
                       <td>{n.confirmations}</td>
+                      <td>{n.mined_height ?? "unmined"}</td>
                       <td>{n.memo_matched ? "yes" : "no"}</td>
                       <td className="small">{when(n.first_seen_at)}</td>
                     </tr>
@@ -172,7 +134,7 @@ function InvoiceDetail({ id, onClose, onChange }: { id: string; onClose: () => v
               </ul>
             </>
           )}
-          {i.purpose !== "campaign_funding" && ["pending", "underpaid"].includes(i.status) && (
+          {i.purpose !== "milestone" && i.status === "awaiting_payment" && i.notes.length === 0 && (
             <ActionButton
               variant="danger"
               onClick={async () => {
@@ -181,7 +143,7 @@ function InvoiceDetail({ id, onClose, onChange }: { id: string; onClose: () => v
                 onChange();
               }}
             >
-              Cancel invoice
+              Cancel request
             </ActionButton>
           )}
         </div>
@@ -196,10 +158,10 @@ function CreditCard({ onInvoice }: { onInvoice: (id: string) => void }) {
   const [amount, setAmount] = useState("1");
   const c = credit.data;
   return (
-    <Card title="Agent credit">
+    <Card title="API credit">
       <p className="muted small">
-        Prepaid {ticker()} your advertiser agent may spend on paid APIs (like premium creator search) within the limits below. Top-ups are shielded
-        invoices.
+        Prepaid API calls your advertiser agent may use on paid APIs (like premium creator search) within the limits below. Top-ups are shielded
+        payments made directly to the API seller's own wallet; this is a prepayment for API calls, not a deposit, and it is not withdrawable.
       </p>
       <ErrorText error={credit.error} />
       {c && (
@@ -221,7 +183,7 @@ function CreditCard({ onInvoice }: { onInvoice: (id: string) => void }) {
             await credit.reload();
           }}
         >
-          Create top-up invoice
+          Create top-up request
         </ActionButton>
       </div>
 
@@ -452,7 +414,7 @@ function PremiumSearchDemo() {
       <p className="muted small">
         A paid API: <code>GET /api/influencers/premium-search</code> answers <code>402 Payment Required</code> with a shielded invoice for{" "}
         {zec(status?.premium_search_price)}. Pay it, then repeat the request with the <code>X-Payment-Id</code> header. A transaction id is not accepted
-        as proof; only the escrow wallet seeing the confirmed payment unlocks it, once.
+        as proof; only the scanner seeing the confirmed payment in the API seller's wallet unlocks it, once.
       </p>
       <div className="row">
         <label className="grow">
@@ -471,7 +433,7 @@ function PremiumSearchDemo() {
             setAgent(await api.agentPremiumSearch(niche));
           }}
         >
-          Let my agent pay from credit
+          Let my agent pay from API credit
         </ActionButton>
       </div>
 
@@ -493,7 +455,7 @@ function PremiumSearchDemo() {
           <Notice tone={agent.payment.status === "paid" ? "good" : agent.payment.status === "refused" ? "bad" : "warn"}>
             Agent payment: <strong>{humanize(agent.payment.status)}</strong>
             {agent.payment.reason && ` · ${agent.payment.reason}`}
-            {agent.payment.status === "pending_approval" && " · approve it under Agent credit above."}
+            {agent.payment.status === "pending_approval" && " · approve it under API credit above."}
           </Notice>
           {agent.results && <ResultsTable results={agent.results} />}
         </div>
@@ -520,21 +482,26 @@ export function WalletPayments() {
     <div className="stack">
       <div className="page-head">
         <div>
-          <h1>Wallet &amp; payments</h1>
-          <p className="muted">Shielded Zcash invoices, your agent's credit and spending limits.</p>
+          <h1>Payments</h1>
+          <p className="muted">
+            Payment requests you pay from your own wallet, directly to each recipient, plus your agent's API credit and spending limits.
+          </p>
         </div>
+        <TestnetNotice inline />
       </div>
 
       <div className="split">
-        <WalletCard />
-        <Card title="Privacy and custody">
+        <Card title="Network and scanner">
+          <WalletStatusPanel />
+        </Card>
+        <Card title="Privacy and payments">
           <PrivacyNote />
         </Card>
       </div>
 
       {open && <InvoiceDetail id={open} onClose={() => setOpen(null)} onChange={() => void invoices.reload()} />}
 
-      <Card title="Transactions">
+      <Card title="Payment requests">
         <ErrorText error={invoices.error} />
         {invoices.data ? <InvoiceHistory invoices={list} onOpen={setOpen} /> : <Spinner />}
       </Card>

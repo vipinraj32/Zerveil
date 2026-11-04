@@ -1,14 +1,16 @@
 """Full lifecycle through the real app, in-process, with real accounts: Google sign-in (mocked Google), shielded
-payout/refund addresses, influencer onboarding → A2A negotiation → policy → advertiser approval → shielded funding
-invoice → wallet scan (simulated wallet) → escrow → proofs → time travel → admin-approved payouts.
+addresses and viewing keys, influencer onboarding → A2A negotiation → policy → advertiser acceptance → fixed-fee
+invoices paid directly to each creator's wallet → scanner confirmation → content → proofs → time travel →
+performance milestone → completed. Zerveil never holds funds.
 
-PAYMENT_MODE=simulated: SimulatedZcashWallet stands in for Zallet, so no ZEC moves. The scanner, invoice rules and
-payout queue are the same code the real wallet backend runs through."""
+MOCKED: PAYMENT_MODE=simulated, so SimulatedScanner stands in for the real view-only scanner and no ZEC moves. The
+invoice rules, scanning and milestone lifecycle are the same code the real scanner runs through."""
 
 import asyncio
 import json
 import uuid
 from decimal import Decimal
+from hashlib import sha256
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -23,12 +25,20 @@ from zerveil.auth.tokens import issue_user_token
 from zerveil.config import Settings
 from zerveil.models import ChannelInfo, User, requirements_hash
 from zerveil.verifier.youtube import FixtureVideoSource, VideoInfo
+from zerveil.zcash.address import bech32m_encode, convert_bits
 
 BASE = "http://localhost:8000"
 ATTESTED = {"in_video_disclosure": True}  # the creator confirms the disclosure is shown/said in the video
 MCP_TOKEN = "test-operator-token"
 ADMIN = "ops@zerveil.example"
-FEE_RESERVE = Decimal("0.0003")
+
+
+def test_ufvk(label: str) -> str:
+    """A string with testnet Unified Full Viewing Key encoding and checksum (not a real key)."""
+    return bech32m_encode("uviewtest", convert_bits(sha256(label.encode()).digest() * 3, 8, 5))
+
+
+test_ufvk.__test__ = False  # a helper, not a test
 
 # name, niche, subscribers, fixed floor, CPM floor, anchor, week-one views
 CREATORS = [
@@ -85,6 +95,8 @@ async def onboard_influencer(app, name, niche, subs, fixed_min, cpm_min, preferr
     await app.state.zx.ctx.store.save_user(user)
     async with client_for(app, user.id) as client:
         await set_address(client, name)
+        key = await client.put("/api/receiving-account", json={"ufvk": test_ufvk(name), "birthday": 4_400_000, "consent": True})
+        assert key.status_code == 200 and key.json()["connected"], key.text
         res = await client.put("/api/me/influencer", json={"niche": niche, "fixed_min": fixed_min, "cpm_min": cpm_min,
                                                             "preferred_fixed": preferred, "persona": "friendly"})  # fmt: skip
         assert res.json()["agent_listed"], res.json()
@@ -107,16 +119,6 @@ async def make_admin(app) -> httpx.AsyncClient:
     user = User(id="USR-ops", email=ADMIN, name="Ops", role="advertiser", created_at=app.state.zx.ctx.clock.now())
     await app.state.zx.ctx.store.save_user(user)
     return client_for(app, user.id)
-
-
-async def approve_all_payouts(admin: httpx.AsyncClient) -> list[dict]:
-    """The operator approves every queued payout; the simulated wallet sends each one."""
-    done = []
-    for p in (await admin.get("/api/admin/payouts", params={"status": "pending_approval"})).json():
-        res = await admin.post(f"/api/admin/payouts/{p['id']}/decision", json={"approved": True, "note": "evidence checked"})
-        assert res.status_code == 200, res.text
-        done.append(res.json())
-    return done
 
 
 CAMPAIGN = {
@@ -162,29 +164,32 @@ async def onboarded(server):
     return app, videos, await onboard_advertiser(app)
 
 
-async def approve_and_fund(app, adv: httpx.AsyncClient, cid: str) -> dict:
-    """Advertiser approves the agreements, pays the shielded funding invoice (simulated wallet), blocks confirm."""
+async def pay(adv: httpx.AsyncClient, invoice_id: str, **body) -> dict:
+    """The advertiser pays from their own wallet (simulated scanner receives it), then the scanner verifies it."""
+    res = await adv.post(f"/api/dev/payments/{invoice_id}/simulate", json=body)
+    assert res.status_code == 200, res.text
+    return res.json()
+
+
+async def approve_and_pay(app, adv: httpx.AsyncClient, cid: str) -> list[dict]:
+    """Advertiser accepts the agreements and pays each creator's fixed-fee invoice (simulated), blocks confirm."""
     assert (await adv.post(f"/api/campaigns/{cid}/decision", json={"approved": True})).status_code == 200
     await app.state.zx.runner.wait_idle()
-    invoice = (await adv.get(f"/api/campaigns/{cid}")).json()["funding_invoices"][0]
-    res = await adv.post(f"/api/dev/payments/{invoice['id']}/simulate", json={})
-    assert res.status_code == 200 and res.json()["status"] == "paid", res.text
-    return res.json()
+    invoices = (await adv.get(f"/api/campaigns/{cid}")).json()["payment_invoices"]
+    return [await pay(adv, i["id"]) for i in invoices]
 
 
 async def test_full_campaign_lifecycle(onboarded):
     app, videos, advertiser_id = onboarded
-    runner, wallet = app.state.zx.runner, app.state.zx.ctx.wallet
+    runner, scanner = app.state.zx.runner, app.state.zx.ctx.wallet
     published: list[tuple[dict, set[str]]] = []
     publish = app.state.zx.ctx.bus.publish
     app.state.zx.ctx.bus.publish = lambda event, audience: (published.append((event, audience)), publish(event, audience))
     adv = client_for(app, advertiser_id)
-    admin = await make_admin(app)
 
     res = await adv.post("/api/campaigns", json=CAMPAIGN)
     assert res.status_code == 201, res.text
     cid = res.json()["spec"]["id"]
-    assert res.json()["spec"]["refund_address"] == ua("advertiser")
     await runner.wait_idle()
 
     # Negotiation over A2A with the onboarded agents: the premium creator is out of budget, the food creator is never contacted
@@ -203,43 +208,55 @@ async def test_full_campaign_lifecycle(onboarded):
     ava = client_for(app, "USR-ava")
     assert (await ava.get(f"/api/deals/{deals['ava']['id']}")).json()["terms"]["payee"] == ua("ava")  # the creator sees their own
 
-    # The advertiser approves; one shielded invoice covers every cap plus the fee reserve
+    # The advertiser accepts; each creator gets their own fixed-fee invoice, payable straight to their own wallet
     campaign = (await adv.get(f"/api/campaigns/{cid}")).json()
     pending = campaign["pending_approval"]
-    assert campaign["status"] == "awaiting_approval" and pending["total"] == "120.00"
-    assert Decimal(pending["invoice_amount"]) == Decimal("120") + 3 * FEE_RESERVE and pending["network"] == "zcash-testnet"
-    assert campaign["funding_invoices"] == []
+    fixed_total = sum(Decimal(d["terms"]["fixed_fee"]) for d in agreed.values())
+    assert campaign["status"] == "awaiting_approval" and pending["total"] == "120.00" and pending["direct"] is True
+    assert Decimal(pending["upfront"]) == fixed_total and pending["network"] == "zcash-testnet"
+    assert campaign["payment_invoices"] == []
     assert (await adv.post(f"/api/campaigns/{cid}/decision", json={"approved": True})).status_code == 200
     await runner.wait_idle()
-    invoice = (await adv.get(f"/api/campaigns/{cid}")).json()["funding_invoices"][0]
-    assert invoice["status"] == "pending" and invoice["simulated"] and invoice["address"].startswith("utest1")
+    payments = (await adv.get(f"/api/campaigns/{cid}/payments")).json()
+    invoices = {i["recipient_id"].removeprefix("USR-"): i for i in payments["invoices"]}
+    assert set(invoices) == set(agreed) and len({i["address"] for i in invoices.values()}) == 3
+    assert Decimal(payments["open_total"]) == fixed_total and payments["pay_all_uri"].startswith("zcash:?address=")
+    invoice = invoices["ava"]
+    assert invoice["status"] == "awaiting_payment" and invoice["simulated"] and invoice["direct"] and invoice["address"].startswith("utest1")
+    assert Decimal(invoice["amount"]) == Decimal(agreed["ava"]["terms"]["fixed_fee"])
     assert invoice["memo"].startswith("ZRV1:") and invoice["zip321_uri"].startswith(f"zcash:{invoice['address']}?amount=")
-    assert all(d["state"] == "AWAITING_FUNDING" for k, d in (await by_influencer(adv, cid)).items() if k != "leo")
+    assert all(d["state"] == "PAYMENT_REQUESTED" for k, d in (await by_influencer(adv, cid)).items() if k != "leo")
     # The public payment page shows what to pay, nothing about the campaign
     public = (await client_for(app).get(f"/api/pay/{invoice['id']}")).json()
     assert public["amount"] == invoice["amount"] and "campaign_id" not in public and "deal_ids" not in public
 
-    # Underpaid → nothing funded; the rest arrives with one confirmation → confirming; more blocks → paid → FUNDED
-    res = await adv.post(f"/api/dev/payments/{invoice['id']}/simulate", json={"amount": "50", "confirmations": 3})
-    assert res.json()["status"] == "underpaid"
-    rest = str(Decimal(invoice["amount"]) - 50)
-    res = await adv.post(f"/api/dev/payments/{invoice['id']}/simulate", json={"amount": rest, "confirmations": 1})
-    assert res.json()["status"] == "confirming"
-    assert all(d["state"] == "FUNDING" for k, d in (await by_influencer(adv, cid)).items() if k != "leo")
-    wallet.confirm(2)
+    # Underpaid → nothing confirmed; the rest arrives with one confirmation → mined; more blocks → confirmed → content
+    half = str(Decimal(invoice["amount"]) / 2)
+    assert (await pay(adv, invoice["id"], amount=half, confirmations=3))["status"] == "underpaid"
+    assert (await pay(adv, invoice["id"], amount=half, confirmations=1))["status"] == "mined"
+    assert (await by_influencer(adv, cid))["ava"]["state"] == "PAYMENT_PENDING"
+    scanner.confirm(2)
     await app.state.zx.deals.tick()
+    for k in ("raj", "mia"):
+        assert (await pay(adv, invoices[k]["id"]))["status"] == "confirmed"
     deals = await by_influencer(adv, cid)
     for k in agreed:
-        assert deals[k]["state"] == "FUNDED", deals[k]
-        assert deals[k]["funding_simulated"] is True
-    assert wallet.balance == Decimal(invoice["amount"])
+        assert deals[k]["state"] == "CONTENT_CREATION", deals[k]
+        assert deals[k]["payment_simulated"] is True and deals[k]["milestones"][0]["status"] == "confirmed"
+    # Both parties get the receipt; nobody else does
+    receipt_id = (await ava.get(f"/api/payments/invoices/{invoice['id']}")).json()["receipt_id"]
+    receipt = (await ava.get(f"/api/receipts/{receipt_id}")).json()
+    assert receipt["recipient_id"] == "USR-ava" and receipt["payer_id"] == advertiser_id and receipt["simulated"] and receipt["receipt_hash"]
+    assert (await adv.get(f"/api/receipts/{receipt_id}")).status_code == 200
+    async with client_for(app, "USR-zoe") as zoe:
+        assert (await zoe.get(f"/api/receipts/{receipt_id}")).status_code == 404
 
-    # The influencer sees their deal (with the brand brief) and their agent was told over A2A that the money is locked
+    # The influencer sees their deal (with the brand brief); their agent was told over A2A about the payment
     mine = (await ava.get("/api/influencer/deals")).json()
     assert [d["id"] for d in mine] == [deals["ava"]["id"]] and mine[0]["campaign"]["brand_handle"] == "@fitfuel"
     assert mine[0]["campaign"]["requirements"] == CAMPAIGN["requirements"] and mine[0]["campaign"]["max_duration_seconds"] == 60
     inbox = (await ava.get("/api/influencer/inbox")).json()
-    assert inbox and inbox[0]["type"] == "funded"
+    assert sorted(m["type"] for m in inbox) == ["payment_confirmed", "payment_requested"]
 
     # Proofs: a valid post, someone else's video, prompt injection — each submitted by the deal's own influencer
     too_long = post_video(app, videos, "vidAva000", "UCavachannel", "My honest FitFuel review @fitfuel #ad", 9_400, seconds=95)
@@ -252,8 +269,8 @@ async def test_full_campaign_lifecycle(onboarded):
     assert res.json()["state"] == "PROOF_REJECTED"
     assert not next(c for c in res.json()["proof"]["checks"] if c["name"] == "disclosure_in_video:US")["passed"]
     res = await ava.post(f"/api/deals/{deals['ava']['id']}/proof", json={"video_url": url, "attestations": ATTESTED})
-    # verified → the fixed fee is decided at once and queued for operator approval
-    assert res.json()["state"] == "FIXED_RELEASED", res.json()["proof"]
+    # verified → content accepted; the performance milestone waits for the day-7 views
+    assert res.json()["state"] == "PERFORMANCE_DUE", res.json()["proof"]
     assert {"disclosure_label:IN", "disclosure_label:US"} <= {c["name"] for c in res.json()["proof"]["checks"] if c["passed"]}
     assert (await ava.post(f"/api/deals/{deals['raj']['id']}/proof", json={"video_url": url})).status_code == 404  # not Ava's deal
 
@@ -268,100 +285,95 @@ async def test_full_campaign_lifecycle(onboarded):
     assert res.json()["state"] == "PROOF_REJECTED"
     assert not next(c for c in res.json()["proof"]["checks"] if c["name"] == "no_ai_directed_instructions")["passed"]
 
-    ava_deal = (await ava.get(f"/api/deals/{deals['ava']['id']}")).json()
-    assert ava_deal["state"] == "FIXED_RELEASED"
-    assert ava_deal["payouts"][0]["kind"] == "fixed" and Decimal(ava_deal["payouts"][0]["amount"]) == Decimal(ava_deal["terms"]["fixed_fee"])
-    queued = ava_deal["payout_requests"][0]
-    assert queued["status"] == "pending_approval" and queued["to_address"] == ua("ava") and not wallet.sent
-    # Only operators see and approve the queue
-    assert (await adv.get("/api/admin/payouts")).status_code == 403
-    sent = await approve_all_payouts(admin)
-    assert [p["status"] for p in sent] == ["submitted"] and wallet.sent[0].to == ua("ava")
-    await app.state.zx.deals.tick()  # the wallet operation finished: its txid is recorded
-    assert (await admin.get("/api/admin/payouts")).json()[0]["status"] == "sent"
-    wallet.confirm(3)
-    await app.state.zx.deals.tick()
-    mine = (await ava.get("/api/payments/payouts")).json()
-    assert mine[0]["status"] == "confirmed" and mine[0]["txid"] == wallet.sent[0].txid
-    assert wallet.sent[0].memo.startswith("ZRV1:")
-
-    # +7 days: performance fee from views, remainder refunded to the advertiser; the two failed proofs expire and refund in full
+    # +7 days: the performance fee is computed from views and requested; the two failed proofs are undelivered
     await adv.post("/api/dev/advance", json={"hours": 24 * 7 + 2})  # past day 7 and the publish deadline
     deals = await by_influencer(adv, cid)
-    done = deals["ava"]
-    assert done["state"] == "COMPLETED"
-    kinds = {p["kind"]: Decimal(p["amount"]) for p in done["payouts"]}
-    terms = done["terms"]
+    assert deals["raj"]["state"] == deals["mia"]["state"] == "UNDELIVERED"
+    perf = next(m for m in deals["ava"]["milestones"] if m["kind"] == "performance")
+    terms = deals["ava"]["terms"]
     expected_perf = min(Decimal(terms["cap"]) - Decimal(terms["fixed_fee"]), Decimal(9_400) / 1000 * Decimal(terms["cpm"])).quantize(Decimal("0.01"))
-    assert kinds["performance"] == expected_perf
-    assert kinds["fixed"] + kinds["performance"] + kinds["refund"] == Decimal("40")
-    assert next(p for p in done["payouts"] if p["kind"] == "refund")["to"] == ua("advertiser")
-    assert deals["raj"]["state"] == deals["mia"]["state"] == "EXPIRED_REFUNDED"
+    assert deals["ava"]["state"] == "PERFORMANCE_DUE" and perf["status"] == "requested" and Decimal(perf["amount"]) == expected_perf
+    assert perf["views"] == 9_400 and perf["evidence_hash"]
+    assert (await pay(adv, perf["invoice_id"]))["status"] == "confirmed"
+    deals = await by_influencer(adv, cid)
+    assert deals["ava"]["state"] == "COMPLETED"
+    assert sum(Decimal(m["amount"]) for m in deals["ava"]["milestones"]) <= Decimal(terms["cap"])
     assert (await adv.get(f"/api/campaigns/{cid}")).json()["status"] == "done"
-    # Decided, but nothing leaves the escrow wallet until the operator approves
-    assert len(wallet.sent) == 1
-    await approve_all_payouts(admin)
-    assert len(wallet.sent) == 5  # ava: fixed, performance, refund; raj and mia: refund
-    assert wallet.balance == 3 * FEE_RESERVE  # the fee reserve stays (the simulated wallet charges no fee)
-    custody = (await admin.get("/api/admin/custody")).json()
-    await app.state.zx.deals.tick()
-    custody = (await admin.get("/api/admin/custody")).json()
-    assert custody["wallet"]["simulated"] is True and Decimal(custody["queued_payouts_total"]) == 0
-    assert Decimal(custody["expected_balance_before_fees"]) == wallet.balance
 
     # Audit trail covers every actor
     actors = {e["actor"] for e in (await adv.get(f"/api/campaigns/{cid}/events")).json()}
-    assert {"advertiser-agent", "policy", "wallet", "escrow", "verifier", "human"} <= actors
+    assert {"advertiser-agent", "policy", "scanner", "payments", "verifier", "human"} <= actors
 
     # Live events reach the campaign owner and each deal's influencer, nobody else
     assert any(advertiser_id in aud and "USR-ava" in aud for e, aud in published if e.get("deal_id") == deals["ava"]["id"])
     assert not any("USR-zoe" in aud for _, aud in published)
 
-    # MCP tools read the same data with the operator token
+    # MCP tools read the same data with the operator token: everything went to creators, nothing is held
     result = await app.state.mcp.call_tool("campaign_spend", {"campaign_id": cid})
     spend = json.loads(result[0][0].text) if isinstance(result, tuple) else json.loads(result[0].text)
-    assert spend["locked_total"] == "120.00" and Decimal(spend["in_escrow"]) == 0
+    assert Decimal(spend["confirmed_paid_to_creators"]) == fixed_total + expected_perf and spend["held_by_zerveil"] == "0"
 
-    for c in (adv, ava, raj, mia, admin):
+    for c in (adv, ava, raj, mia):
         await c.aclose()
 
 
-async def test_funding_invoice_expiry_and_late_payment(onboarded):
-    """An unpaid funding invoice expires and closes its deals; money that arrives afterwards is refunded, never used."""
+async def test_milestone_expiry_and_late_payment(onboarded):
+    """An unpaid fixed-fee invoice expires and closes its deal; money that arrives afterwards is recorded, never used
+    and never refunded by Zerveil (it is already in the creator's wallet)."""
     app, _, advertiser_id = onboarded
-    wallet = app.state.zx.ctx.wallet
-    async with client_for(app, advertiser_id) as adv, await make_admin(app) as admin:
+    scanner = app.state.zx.ctx.wallet
+    async with client_for(app, advertiser_id) as adv:
         cid = (await adv.post("/api/campaigns", json=CAMPAIGN)).json()["spec"]["id"]
         await app.state.zx.runner.wait_idle()
         await adv.post(f"/api/campaigns/{cid}/decision", json={"approved": True})
         await app.state.zx.runner.wait_idle()
-        invoice = (await adv.get(f"/api/campaigns/{cid}")).json()["funding_invoices"][0]
-        await adv.post("/api/dev/advance", json={"hours": 3})  # past ZCASH_INVOICE_TTL_MINUTES
+        invoice = (await adv.get(f"/api/campaigns/{cid}")).json()["payment_invoices"][0]
+        await adv.post("/api/dev/advance", json={"hours": 25})  # past ZCASH_INVOICE_TTL_MINUTES
         deals = await by_influencer(adv, cid)
         assert all(d["state"] == "PAYMENT_EXPIRED" for k, d in deals.items() if k != "leo")
         assert (await adv.get(f"/api/payments/invoices/{invoice['id']}")).json()["status"] == "expired"
 
-        wallet.receive(invoice["address"], Decimal(invoice["amount"]), invoice["memo"], confirmations=5)
+        scanner.receive(invoice["address"], Decimal(invoice["amount"]), invoice["memo"], confirmations=5)
         await app.state.zx.deals.tick()
-        assert (await adv.get(f"/api/payments/invoices/{invoice['id']}")).json()["status"] == "late_payment"
+        late = (await adv.get(f"/api/payments/invoices/{invoice['id']}")).json()
+        assert late["status"] == "expired" and Decimal(late["received"]) == Decimal(invoice["amount"]) and late["receipt_id"] is None
+        assert "late_payment" in [e["kind"] for e in late["events"]]
         assert all(d["state"] == "PAYMENT_EXPIRED" for k, d in (await by_influencer(adv, cid)).items() if k != "leo")
-        refunds = (await admin.get("/api/admin/payouts")).json()
-        assert len(refunds) == 1 and refunds[0]["kind"] == "refund" and refunds[0]["to_address"] == ua("advertiser")
-        assert refunds[0]["status"] == "pending_approval"
 
 
 async def test_status_and_wallet_never_expose_secrets(onboarded):
     app, _, advertiser_id = onboarded
-    async with client_for(app, advertiser_id) as adv, await make_admin(app) as admin:
+    async with client_for(app, advertiser_id) as adv, await make_admin(app) as admin, client_for(app, "USR-ava") as ava:
         status = (await adv.get("/api/status")).json()
         assert status["payment_mode"] == "simulated" and status["payments_simulated"] is True
-        assert status["zcash"]["network"] == "testnet" and status["zcash"]["ticker"] == "TAZ"
-        assert "rpc" not in json.dumps(status).lower()
+        assert status["zcash"]["network"] == "testnet" and status["zcash"]["ticker"] == "TAZ" and status["zcash"]["direct_payments"] is True
+        assert status["zcash"]["testnet_notice"] == "Zcash Testnet — TAZ — No real monetary value"
+        assert "rpc" not in json.dumps(status).lower() and "devtool_wallet_dir" not in json.dumps(status)
         mine = (await adv.get("/api/wallet/status")).json()
-        assert mine["simulated"] and mine["your_address"] == ua("advertiser") and "escrow_balance" not in mine
-        assert "escrow_balance" in (await admin.get("/api/wallet/status")).json()
+        assert mine["simulated"] and mine["your_address"] == ua("advertiser") and mine["custody"].startswith("none")
+        assert "escrow_balance" not in mine and mine["faucet_url"].startswith("https://")
+        creator = (await ava.get("/api/wallet/status")).json()
+        assert creator["receiving_account_connected"] is True
+        account = (await ava.get("/api/receiving-account")).json()
+        assert account["connected"] and "ufvk" not in json.dumps(account).lower() and account["account"]["key_fingerprint"]
+        assert (await adv.get("/api/admin/scanner")).status_code == 403
+        assert (await admin.get("/api/admin/scanner")).json()["custody"].startswith("none")
         assert (await adv.get("/api/me")).json()["is_admin"] is False
         assert (await admin.get("/api/me")).json()["is_admin"] is True
+
+
+async def test_creators_connect_a_viewing_key_never_a_seed(onboarded):
+    app, _, advertiser_id = onboarded
+    async with client_for(app, "USR-ava") as ava, client_for(app, advertiser_id) as adv:
+        seed = await ava.put("/api/receiving-account", json={"ufvk": " ".join(["abandon"] * 24), "birthday": 1, "consent": True})
+        assert seed.status_code == 400 and "seed phrase" in seed.json()["detail"]
+        no_consent = await ava.put("/api/receiving-account", json={"ufvk": test_ufvk("ava2"), "birthday": 1, "consent": False})
+        assert no_consent.status_code == 400
+        assert (await adv.put("/api/receiving-account", json={"ufvk": test_ufvk("adv"), "birthday": 1, "consent": True})).status_code == 403
+        # Disconnecting takes the creator out of the directory: their payments could no longer be confirmed
+        assert (await ava.delete("/api/receiving-account")).json()["connected"] is False
+        assert "USR-ava" not in {i["id"] for i in (await adv.get("/api/influencers")).json()}
+        assert (await ava.post("/api/payments/links", json={"title": "Tip", "amount": "1"})).status_code == 409
 
 
 async def test_zcash_address_is_validated(onboarded):
@@ -394,7 +406,7 @@ async def test_campaigns_are_private_to_their_advertiser(onboarded):
         await app.state.zx.runner.wait_idle()
         assert (await rival.get(f"/api/campaigns/{cid}")).status_code == 404
         assert (await rival.get("/api/campaigns")).json() == []
-        assert (await rival.post("/api/campaigns", json=CAMPAIGN)).status_code == 409  # no refund address yet
+        assert (await rival.post("/api/campaigns", json=CAMPAIGN)).status_code == 400  # above the default agent campaign limit
         assert (await ava.post("/api/campaigns", json=CAMPAIGN)).status_code == 403  # influencers cannot buy
         directory = (await adv.get("/api/influencers")).json()
         assert {i["id"] for i in directory} == {f"USR-{c[0]}" for c in CREATORS}

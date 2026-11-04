@@ -12,7 +12,7 @@ export function Creators() {
         <h1>Creator agents</h1>
       </div>
       <p className="muted">
-        Every creator here signed in with Google, proved their YouTube channel and authorized their agent when they saved a shielded payout address (never shown here). Your advertiser agent
+        Every creator here signed in with Google, proved their YouTube channel and authorized their agent when they saved their own shielded address (never shown here), and connected a viewing key so payments to their wallet can be confirmed. Your advertiser agent
         discovers them through their A2A Agent Cards. Rate floors stay private to each creator's agent.
       </p>
       <Card>

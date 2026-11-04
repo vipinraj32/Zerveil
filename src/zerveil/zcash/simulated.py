@@ -1,18 +1,24 @@
-"""In-process stand-in for a Zcash wallet, for development and tests only.
+"""In-process stand-in for the payment scanner, for development and tests only.
 
-Nothing here touches a blockchain. Addresses are well-formed testnet Unified Address *strings* derived from random
-bytes (not real keys), transaction ids are prefixed `sim`, and every record the app builds from this wallet carries
-`simulated=True`, which the UI shows as "Simulated — no ZEC moved". `PAYMENT_MODE=zcash` never uses it.
+Nothing here touches a blockchain:
+- Addresses are well-formed testnet Unified Address *strings* derived from random bytes, not real keys. Never use
+  them for real testing.
+- Transaction ids are prefixed `sim`.
+- Every record the app builds from this scanner carries `simulated=True`, which the UI shows as
+  "Simulated — no ZEC moved".
+
+`PAYMENT_MODE=zcash` never uses it.
 """
 
 from __future__ import annotations
 
+import hashlib
 import secrets
 from dataclasses import dataclass, field
 from decimal import Decimal
 
 from .address import UA_HRP, bech32m_encode, convert_bits
-from .wallet import OperationStatus, ReceivedNote, SendResult, TxStatus, WalletError, WalletInfo
+from .wallet import ReceivedNote, WalletError, WalletInfo
 
 
 def fake_unified_address(network: str = "testnet", seed: bytes | None = None) -> str:
@@ -21,79 +27,65 @@ def fake_unified_address(network: str = "testnet", seed: bytes | None = None) ->
 
 
 @dataclass
-class _Sent:
-    txid: str
-    to: str
-    amount: Decimal
-    memo: str
-
-
-@dataclass
-class SimulatedZcashWallet:
+class SimulatedScanner:
     network: str = "testnet"
     name: str = "simulated"
     simulated: bool = True
-    balance: Decimal = Decimal("0")
-    notes: list[ReceivedNote] = field(default_factory=list)
-    sent: list[_Sent] = field(default_factory=list)
-    confirmations: dict[str, int] = field(default_factory=dict)
-    fail_next_send: str = ""  # tests: make the next send fail with this message
-    _addresses: set[str] = field(default_factory=set)
-    _ops: dict[str, OperationStatus] = field(default_factory=dict)
+    tip_height: int = 4_500_000
+    notes: dict[str, list[ReceivedNote]] = field(default_factory=dict)  # account → notes
+    _accounts: dict[str, str] = field(default_factory=dict)  # account → key fingerprint
+    _addresses: dict[str, str] = field(default_factory=dict)  # address → account
 
-    async def new_invoice_address(self) -> str:
+    async def import_viewing_key(self, label: str, ufvk: str, birthday: int) -> str:
+        fingerprint = hashlib.sha256(ufvk.encode()).hexdigest()
+        for account, fp in self._accounts.items():
+            if fp == fingerprint:
+                return account
+        account = "sim-acct-" + fingerprint[:16]
+        self._accounts[account] = fingerprint
+        self.notes.setdefault(account, [])
+        return account
+
+    async def new_address(self, account: str) -> str:
+        if account not in self._accounts:
+            raise WalletError("unknown watched account")
         address = fake_unified_address(self.network)
-        self._addresses.add(address)
+        self._addresses[address] = account
         return address
 
     def receive(self, address: str, amount: Decimal, memo: str = "", confirmations: int = 1, txid: str | None = None) -> ReceivedNote:
-        """Simulates an incoming shielded payment (dev endpoint / tests)."""
-        if address not in self._addresses:
-            raise WalletError("not an address of this wallet")
-        note = ReceivedNote(txid=txid or "sim" + secrets.token_hex(30), pool="orchard", output_index=len(self.notes), address=address,
-                            amount=amount, confirmations=confirmations, memo=memo)  # fmt: skip
-        self.notes.append(note)
-        self.balance += amount
+        """Simulates an incoming shielded payment to a watched address (dev endpoint / tests)."""
+        account = self._addresses.get(address)
+        if account is None:
+            raise WalletError("not an address of a watched account")
+        notes = self.notes[account]
+        height = self.tip_height - confirmations + 1 if confirmations > 0 else None
+        note = ReceivedNote(txid=txid or "sim" + secrets.token_hex(30), pool="ironwood", output_index=len(notes), address=address,
+                            amount=amount, confirmations=confirmations, memo=memo, mined_height=height)  # fmt: skip
+        notes.append(note)
         return note
 
     def confirm(self, blocks: int = 1) -> None:
-        """Mines `blocks` simulated blocks."""
-        self.notes = [ReceivedNote(**{**n.__dict__, "confirmations": n.confirmations + blocks}) for n in self.notes]
-        self.confirmations = {k: v + blocks for k, v in self.confirmations.items()}
+        """Mines `blocks` simulated blocks: every note gains that many confirmations."""
+        self.tip_height += blocks
+        for account, notes in self.notes.items():
+            self.notes[account] = [
+                ReceivedNote(
+                    **{**n.__dict__, "confirmations": n.confirmations + blocks, "mined_height": n.mined_height or self.tip_height - blocks + 1}
+                )  # fmt: skip
+                for n in notes
+            ]
 
-    async def received(self, addresses: list[str], min_confirmations: int = 0) -> list[ReceivedNote]:
+    def expire(self, txid: str) -> None:
+        """Marks an unmined simulated transaction as expired (it will never confirm)."""
+        for account, notes in self.notes.items():
+            self.notes[account] = [ReceivedNote(**{**n.__dict__, "expired": True}) if n.txid == txid and n.confirmations == 0 else n
+                                   for n in notes]  # fmt: skip
+
+    async def received(self, account: str, addresses: list[str]) -> list[ReceivedNote]:
         wanted = set(addresses)
-        return [n for n in self.notes if n.address in wanted and n.confirmations >= min_confirmations]
-
-    async def send(self, to: str, amount: Decimal, memo: str) -> SendResult:
-        if self.fail_next_send:
-            message, self.fail_next_send = self.fail_next_send, ""
-            raise WalletError(message)
-        if amount > self.balance:
-            raise WalletError(f"insufficient funds: {self.balance} available")
-        txid = "sim" + secrets.token_hex(30)
-        self.balance -= amount
-        self.sent.append(_Sent(txid, to, amount, memo))
-        self.confirmations[txid] = 0
-        op = "opid-sim-" + secrets.token_hex(8)
-        self._ops[op] = OperationStatus("success", (txid,))
-        return SendResult(operation_id=op)
-
-    async def operation(self, operation_id: str) -> OperationStatus:
-        return self._ops.get(operation_id, OperationStatus("unknown"))
-
-    async def transaction(self, txid: str) -> TxStatus | None:
-        sent = next((s for s in self.sent if s.txid == txid), None)
-        if sent is None:
-            return None
-        return TxStatus(txid=txid, confirmations=self.confirmations.get(txid, 0), outgoing_memos=(sent.memo,))
-
-    async def recent_outgoing(self, limit: int = 200) -> list[TxStatus]:
-        return [TxStatus(s.txid, self.confirmations.get(s.txid, 0), (s.memo,)) for s in self.sent[-limit:]]
-
-    async def validate_address(self, address: str) -> str | None:
-        return None
+        return [n for n in self.notes.get(account, []) if n.address in wanted or n.memo.startswith("ZRV1:")]
 
     async def info(self) -> WalletInfo:
-        return WalletInfo(backend=self.name, network=self.network, simulated=True, reachable=True, escrow_balance=self.balance,
-                          detail="Simulated wallet: no Zcash node or wallet is connected and no ZEC moves.")  # fmt: skip
+        return WalletInfo(backend=self.name, network=self.network, simulated=True, reachable=True, tip_height=self.tip_height,
+                          detail="Simulated scanner: no Zcash node or wallet is connected and no ZEC moves.")  # fmt: skip

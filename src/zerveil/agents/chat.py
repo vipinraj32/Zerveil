@@ -111,7 +111,10 @@ def creator_counter(brand: str, received: Offer, counter: Offer, last_round: boo
 
 def creator_accepts(brand: str, offer: Offer) -> str:
     lead = _pick(f"{offer.deal_id}:{offer.round}:yes", ["Deal!", "Sounds good, it's a deal!", "Perfect, let's do it!"])
-    return f"{lead} {pay_words(offer).capitalize()} works for me. I've signed the terms, and I'll post the {_deliverable(offer)} once {brand} funds the escrow."
+    return (
+        f"{lead} {pay_words(offer).capitalize()} works for me. I've signed the terms, and I'll post the {_deliverable(offer)} "
+        f"once {brand}'s payment to my wallet confirms."
+    )
 
 
 def creator_declines(reason: str) -> str:

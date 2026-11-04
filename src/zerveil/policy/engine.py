@@ -6,8 +6,11 @@ anything is signed. A non-empty violation list means "do not sign".
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from decimal import Decimal
+from typing import Any
 
 from ..auth.crypto import verify_text
 from ..models import DEFAULT_MAX_ROUNDS, CampaignSpec, DealTerms, InfluencerProfile, Offer, requirements_hash
@@ -95,14 +98,23 @@ def check_terms(campaign: CampaignSpec, terms: DealTerms, influencer: Influencer
     return r
 
 
-def check_funding(campaign: CampaignSpec, caps: list[Decimal], fee_reserve: Decimal, amount: Decimal, committed_spend: Decimal) -> PolicyResult:
-    """Gate before a funding invoice is issued: it asks for exactly the agreed caps plus the payout fee reserve."""
+def check_milestone(terms: DealTerms, kind: str, amount: Decimal) -> PolicyResult:
+    """Gate before a milestone invoice is issued: the fixed milestone asks for exactly the agreed fixed fee; the
+    performance milestone for at most what the cap leaves after the fixed fee."""
     r = PolicyResult()
-    r.require(bool(caps), "no deals to fund")
-    r.require(amount == sum(caps, Decimal("0")) + fee_reserve * len(caps), "invoice amount differs from the agreed caps plus fee reserve")
-    r.require(committed_spend <= campaign.budget, f"budget exceeded: {committed_spend} > {campaign.budget}")
-    r.require(bool(campaign.refund_address), "the advertiser has no refund address for unspent escrow")
+    r.require(amount > 0, "a milestone must request a positive amount")
+    if kind == "fixed":
+        r.require(amount == terms.fixed_fee, f"fixed milestone {amount} differs from the agreed fixed fee {terms.fixed_fee}")
+    elif kind == "performance":
+        r.require(amount <= terms.cap - terms.fixed_fee, f"performance milestone {amount} exceeds the cap left after the fixed fee")
+    else:
+        r.violations.append(f"unknown milestone kind {kind}")
     return r
+
+
+def evidence_hash(evidence: dict[str, Any]) -> str:
+    """sha256 of the evidence a payment decision was made on (terms hash, proof checks, views)."""
+    return hashlib.sha256(json.dumps(evidence, sort_keys=True, default=str).encode()).hexdigest()
 
 
 def needs_human_approval(amount: Decimal, threshold: Decimal) -> bool:

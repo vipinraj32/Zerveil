@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import Any
 
 from ..models import AuditEvent, Campaign, Deal, User
-from ..payments.models import CreditEntry, Invoice, PaymentEvent, PayoutRequest, SpendRequest
+from ..payments.models import CreditEntry, Invoice, PaymentEvent, Receipt, ReceivingAccount, SpendRequest
 
 
 class MemoryStore:
@@ -23,7 +23,8 @@ class MemoryStore:
         self._lessons: dict[str, dict[str, Any]] = {}
         self._sessions: dict[str, dict[str, Any]] = {}
         self._invoices: dict[str, Invoice] = {}
-        self._payouts: dict[str, PayoutRequest] = {}
+        self._receiving: dict[str, ReceivingAccount] = {}
+        self._receipts: dict[str, Receipt] = {}
         self._credit: list[CreditEntry] = []
         self._spend_requests: dict[str, SpendRequest] = {}
         self._payment_events: list[PaymentEvent] = []
@@ -191,25 +192,30 @@ class MemoryStore:
         ]  # fmt: skip
         return [i.model_copy(deep=True) for i in sorted(rows, key=lambda i: i.created_at, reverse=True)]
 
-    async def save_payout(self, payout: PayoutRequest, expect_status: str | None = None) -> bool:
-        current = self._payouts.get(payout.id)
-        if expect_status is not None and (current is None or current.status != expect_status):
-            return False
-        self._payouts[payout.id] = payout.model_copy(deep=True)
-        return True
+    async def save_receiving_account(self, account: ReceivingAccount) -> None:
+        self._receiving[account.id] = account.model_copy(deep=True)
 
-    async def get_payout(self, payout_id: str) -> PayoutRequest | None:
-        p = self._payouts.get(payout_id)
-        return p.model_copy(deep=True) if p else None
+    async def get_receiving_account(self, owner_id: str) -> ReceivingAccount | None:
+        rows = sorted((a for a in self._receiving.values() if a.owner_id == owner_id), key=lambda a: a.authorized_at, reverse=True)
+        return rows[0].model_copy(deep=True) if rows else None
 
-    async def list_payouts(self, *, status: set[str] | None = None, deal_id: str | None = None, beneficiary_id: str | None = None,
-                           campaign_id: str | None = None) -> list[PayoutRequest]:  # fmt: skip
-        rows = [
-            p for p in self._payouts.values()
-            if (status is None or p.status in status) and (deal_id is None or p.deal_id == deal_id)
-            and (beneficiary_id is None or p.beneficiary_id == beneficiary_id) and (campaign_id is None or p.campaign_id == campaign_id)
-        ]  # fmt: skip
-        return [p.model_copy(deep=True) for p in sorted(rows, key=lambda p: p.created_at, reverse=True)]
+    async def get_receiving_account_by_id(self, account_id: str) -> ReceivingAccount | None:
+        a = self._receiving.get(account_id)
+        return a.model_copy(deep=True) if a else None
+
+    async def list_receiving_accounts(self) -> list[ReceivingAccount]:
+        return [a.model_copy(deep=True) for a in self._receiving.values()]
+
+    async def save_receipt(self, receipt: Receipt) -> None:
+        self._receipts[receipt.id] = receipt.model_copy(deep=True)
+
+    async def get_receipt(self, receipt_id: str) -> Receipt | None:
+        r = self._receipts.get(receipt_id)
+        return r.model_copy(deep=True) if r else None
+
+    async def list_receipts(self, user_id: str) -> list[Receipt]:
+        rows = [r for r in self._receipts.values() if user_id in (r.payer_id, r.recipient_id)]
+        return [r.model_copy(deep=True) for r in sorted(rows, key=lambda r: r.issued_at, reverse=True)]
 
     async def add_credit(self, entry: CreditEntry) -> bool:
         if any(e.ref == entry.ref and e.kind == entry.kind for e in self._credit):

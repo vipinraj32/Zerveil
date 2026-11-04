@@ -57,7 +57,7 @@ async def test_proof_is_refused_for_another_creators_deal_or_an_unfunded_one(ser
     await app.state.zx.runner.wait_idle()
     ava = client_for(app, "USR-ava")
     deal = (await ava.get("/api/influencer/deals")).json()[0]
-    assert deal["state"] not in ("FUNDED", "PROOF_REJECTED")  # the advertiser has not paid yet
+    assert deal["state"] not in ("CONTENT_CREATION", "PROOF_REJECTED")  # the advertiser has not paid yet
     url = {"video_url": "https://youtube.com/shorts/abcdefghijk"}
 
     res = await client_for(app, "USR-zed").post(f"/api/deals/{deal['id']}/proof", json=url)

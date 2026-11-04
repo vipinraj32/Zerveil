@@ -48,7 +48,7 @@ jobs:
           uv export --format requirements-txt --no-hashes --no-dev --no-emit-project -o requirements.txt
           uv export --format requirements-txt --no-hashes --only-dev --no-emit-project -o requirements-dev.txt
           git diff --exit-code -- requirements.txt requirements-dev.txt
-      - name: Tests (simulated wallet and mocked Zallet RPC; real-testnet tests skip without ZCASH_LIVE_RPC_URL)
+      - name: Tests (simulated scanner and mocked zcash-devtool; real-testnet tests skip without ZCASH_LIVE_DEVTOOL_BIN)
         run: uv run pytest -q
 
   frontend:

@@ -12,14 +12,14 @@ const ROLES: Record<Role, { title: string; sub: string; note: string; other: Rol
   advertiser: {
     title: "Sign in as an advertiser",
     sub: "Run campaigns and let your agent negotiate.",
-    note: "Next you’ll add a shielded Zcash refund address (Unified Address). No browser wallet needed.",
+    note: "Next you’ll add your brand details. You pay creators directly from your own Zcash wallet; no browser wallet needed.",
     other: "influencer",
     otherLabel: "Are you a creator? Join as a creator",
   },
   influencer: {
     title: "Join as a creator",
     sub: "Get sponsored. Your agent negotiates for you.",
-    note: "Google will also ask for read-only YouTube access to prove you own your channel. Then you add a shielded Zcash payout address.",
+    note: "Google will also ask for read-only YouTube access to prove you own your channel. Then you add your shielded Zcash address and a viewing key of your receiving account.",
     other: "advertiser",
     otherLabel: "Running a campaign? Sign in as an advertiser",
   },
@@ -48,7 +48,7 @@ export function Login() {
           <ul className="auth-points">
             <li>AI agents negotiate sponsorships within your limits.</li>
             <li>Deterministic code decides; the LLM only proposes.</li>
-            <li>Campaigns are funded with shielded Zcash; creators are paid privately after verified posts.</li>
+            <li>Advertisers pay creators directly in shielded Zcash, wallet to wallet; Zerveil holds no funds.</li>
           </ul>
         </div>
         <p className="auth-tag">Zcash testnet · TAZ has no monetary value</p>

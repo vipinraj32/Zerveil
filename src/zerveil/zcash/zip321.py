@@ -25,3 +25,19 @@ def payment_uri(address: str, amount: Decimal, memo: str = "", message: str = ""
     if message:
         params.append(f"message={quote(message, safe='')}")
     return f"zcash:{address}?{'&'.join(params)}"
+
+
+def multi_payment_uri(payments: list[tuple[str, Decimal, str, str]]) -> str:
+    """One ZIP-321 request paying several recipients at once: [(address, amount, memo, message), …]. Wallets that
+    support multi-payment requests build one transaction with one output per recipient."""
+    if len(payments) == 1:
+        return payment_uri(*payments[0])
+    params: list[str] = []
+    for i, (address, amount, memo, message) in enumerate(payments):
+        suffix = f".{i}" if i else ""
+        params += [f"address{suffix}={address}", f"amount{suffix}={format_zec(amount)}"]
+        if memo:
+            params.append(f"memo{suffix}={memo_param(memo)}")
+        if message:
+            params.append(f"message{suffix}={quote(message, safe='')}")
+    return f"zcash:?{'&'.join(params)}"

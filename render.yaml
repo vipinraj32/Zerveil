@@ -26,15 +26,13 @@ services:
         sync: false
       - key: YOUTUBE_API_KEY
         sync: false
-      - key: ADMIN_EMAILS # Google accounts that approve payouts
+      - key: ADMIN_EMAILS # Google accounts with the read-only operator views (no funds are held)
         sync: false
-      # payments: simulated (no ZEC moves) | zcash (real wallet over JSON-RPC; see README "Zcash wallet")
+      # payments: simulated (no TAZ moves) | zcash (direct payments, real testnet scanning with zcash-devtool; see README)
       - key: PAYMENT_MODE
         value: simulated
       - key: ZCASH_NETWORK
         value: testnet
-      - key: PAYOUT_APPROVAL_REQUIRED
-        value: "true"
       # optional
       - key: ANTHROPIC_API_KEY
         sync: false
@@ -44,17 +42,15 @@ services:
         value: "false"
       - key: LANGSMITH_API_KEY
         sync: false
-      # PAYMENT_MODE=zcash only. The wallet RPC must be reachable privately (e.g. a private service or tunnel), never
-      # exposed to the public internet.
-      - key: ZCASH_WALLET_RPC_URL
+      # PAYMENT_MODE=zcash only. This image does not contain zcash-devtool: PAYMENT_MODE=zcash needs an image that adds
+      # the binary and a persistent disk for ZCASH_DEVTOOL_WALLET_DIR (see README, "Deployment").
+      - key: ZCASH_LIGHTWALLETD_URL
+        value: https://testnet.zec.rocks:443
+      - key: ZCASH_DEVTOOL_WALLET_DIR
         sync: false
-      - key: ZCASH_WALLET_RPC_USER
+      - key: ZCASH_API_SELLER_UFVK
         sync: false
-      - key: ZCASH_WALLET_RPC_PASSWORD
-        sync: false
-      - key: ZCASH_ESCROW_ACCOUNT
-        sync: false
-      - key: ZCASH_ESCROW_FROM_ADDRESS
+      - key: ZCASH_API_SELLER_BIRTHDAY
         sync: false
       - key: ZCASH_EXPLORER_TX_URL
         sync: false

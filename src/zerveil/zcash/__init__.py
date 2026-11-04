@@ -1,32 +1,21 @@
-"""Zcash payment rails: amounts, Unified Address checks, ZIP-321 payment URIs, memos and the wallet backends.
+"""Zcash payment rails: amounts, Unified Address and viewing-key checks, ZIP-321 payment URIs, memos and the
+view-only payment scanners.
 
-Cryptography (keys, proving, signing, note scanning) stays inside the wallet. Zerveil only talks to it over its
-JSON-RPC interface (`rpc.ZalletRpcWallet`), or to the in-process `simulated.SimulatedZcashWallet` in development and
-tests, which never claims a real transaction.
+Zerveil holds no funds and no spending keys. Payers send shielded ZEC straight to the recipient's own wallet; the
+scanner (`devtool.DevtoolScanner`, or `simulated.SimulatedScanner` in development and tests) watches the recipient's
+receiving account with a viewing key the recipient connected, and reports what arrived.
 """
 
 from .amounts import ZATOSHI, format_zec, to_zatoshi, zec_from_zatoshi
-from .wallet import (
-    OperationStatus,
-    ReceivedNote,
-    SendResult,
-    TxStatus,
-    WalletError,
-    WalletInfo,
-    WalletUnavailable,
-    ZcashWallet,
-)
+from .wallet import PaymentScanner, ReceivedNote, WalletError, WalletInfo, WalletUnavailable
 
 __all__ = [
     "ZATOSHI",
-    "OperationStatus",
+    "PaymentScanner",
     "ReceivedNote",
-    "SendResult",
-    "TxStatus",
     "WalletError",
     "WalletInfo",
     "WalletUnavailable",
-    "ZcashWallet",
     "format_zec",
     "to_zatoshi",
     "zec_from_zatoshi",

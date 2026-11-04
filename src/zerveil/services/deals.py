@@ -1,6 +1,9 @@
-"""Deal lifecycle after negotiation: policy gate → advertiser approval → shielded funding invoice (Zcash) →
-escrow account funded (verified from wallet scan data) → proof verification → payouts queued for approval and sent
-as shielded transactions. Every transition is written to the audit log and pushed to the participants' live streams."""
+"""Deal lifecycle after negotiation: policy gate → advertiser accepts the agreement → fixed-fee invoice paid by the
+advertiser directly to the creator's own shielded wallet → confirmed by the view-only scanner → content creation →
+proof verification → performance milestone (computed from verified views at T+7d, paid the same way) → completed.
+
+Zerveil holds no funds: it requests, verifies and records payments. Every transition is written to the audit log and
+pushed to the participants' live streams."""
 
 from __future__ import annotations
 
@@ -23,8 +26,8 @@ from ..models import (
     DealState,
     DealTerms,
     InfluencerProfile,
+    Milestone,
     Offer,
-    Payout,
     Proof,
     ProofCheck,
     new_id,
@@ -32,7 +35,7 @@ from ..models import (
 )
 from ..payments.models import Invoice
 from ..payments.service import PaymentError, PaymentService
-from ..policy import PolicyResult, check_funding, check_terms, performance_payout
+from ..policy import PolicyResult, check_milestone, check_terms, evidence_hash, performance_payout
 from ..verifier.content import analyze_content
 from ..verifier.explain import explain_rejection, explain_sent_back
 from ..verifier.verify import all_passed, check_video
@@ -41,14 +44,14 @@ from .context import AppContext
 
 log = logging.getLogger(__name__)
 
-# Funding requested, payment not confirmed yet
-PAYMENT_PENDING = {DealState.AWAITING_FUNDING, DealState.FUNDING}
-# Entering these frees the deal's budget reservation: it can no longer be (or never was) funded
-RELEASES_BUDGET = {DealState.REJECTED, DealState.BLOCKED, DealState.PAYMENT_EXPIRED, DealState.EXPIRED_REFUNDED, DealState.ARCHIVED}
+# Payment requested, not confirmed yet
+PAYMENT_PENDING = {DealState.PAYMENT_REQUESTED, DealState.PAYMENT_PENDING}
+# Entering these frees the deal's budget reservation: nothing more will be paid for it
+RELEASES_BUDGET = {DealState.REJECTED, DealState.BLOCKED, DealState.PAYMENT_EXPIRED, DealState.ARCHIVED}
 POLICY_KIND = "agent_policy"
 # Audit kinds only the advertiser sees: they name the advertiser's limits or internal reasoning
 ADVERTISER_PRIVATE_EVENTS = {"negotiation_move", "negotiation_decision", "policy_gate", "approval_decision", "campaign_full",
-                             "discovered", "agent_unreachable", "lessons_applied", "funding_refused"}  # fmt: skip
+                             "discovered", "agent_unreachable", "lessons_applied", "milestone_refused"}  # fmt: skip
 
 
 # Negotiation sessions (one per creator in a campaign, run one after another)
@@ -74,7 +77,7 @@ def _cap(offer: dict[str, Any] | None) -> Decimal:
 def campaign_progress(campaign: Campaign, sessions: list[dict[str, Any]]) -> dict[str, Any]:
     """Where the campaign's creator queue stands, computed only from the persisted sessions. Agreed spend counts the
     caps (most each deal can pay) of AGREED negotiations; proposed spend is the latest offer on the table for every
-    creator, agreed or not. Neither is a payment: nothing moves until the advertiser's wallet signs."""
+    creator, agreed or not. Neither is a payment: nothing moves until the advertiser's own wallet signs."""
 
     def count(*statuses: str) -> int:
         return sum(1 for x in sessions if x["status"] in statuses)
@@ -111,14 +114,14 @@ class DealError(Exception):
 class DealService:
     def __init__(self, ctx: AppContext) -> None:
         self.ctx = ctx
-        self._lock = asyncio.Lock()  # serializes escrow/ledger mutations
+        self._lock = asyncio.Lock()
         self._owners: dict[str, str] = {}  # campaign → advertiser user, for live-event routing
         self._deal_influencers: dict[str, str] = {}
         self._deal_locks: dict[str, asyncio.Lock] = {}
         self._negotiating: set[str] = set()  # deals whose negotiation loop is running in this process
         self._cancel: set[str] = set()
         self.payments = PaymentService(ctx)
-        self.payments.on_status["campaign_funding"] = self.on_funding_invoice
+        self.payments.on_status["milestone"] = self.on_milestone_invoice
 
     # ---- helpers -----------------------------------------------------------
 
@@ -199,12 +202,12 @@ class DealService:
             return
         if not c.negotiation_cancelled and any(x["status"] in ("QUEUED", "RUNNING") for x in await self.negotiation_sessions(campaign_id)):
             return  # creators are still waiting their turn: the campaign is negotiating
-        terminal = {DealState.REJECTED, DealState.BLOCKED, DealState.PAYMENT_EXPIRED, DealState.COMPLETED, DealState.EXPIRED_REFUNDED,
+        terminal = {DealState.REJECTED, DealState.BLOCKED, DealState.PAYMENT_EXPIRED, DealState.COMPLETED, DealState.UNDELIVERED,
                     DealState.ARCHIVED}  # fmt: skip
         if DealState.AWAITING_APPROVAL in states:
             status = "awaiting_approval"
         elif states & PAYMENT_PENDING:
-            status = "funding"
+            status = "awaiting_payment"
         elif states and states <= terminal:
             status = "done"
         else:
@@ -498,8 +501,8 @@ class DealService:
                 "terms_hash": h,
                 "terms_hash_matches_approval": d.approved_terms_hash in (None, h),
                 "gates": gates,
-                "funding_simulated": d.funding_simulated,
-                "funding_invoice_id": d.funding_invoice_id,
+                "payment_simulated": d.payment_simulated,
+                "milestones": [m.model_dump(mode="json", exclude={"evidence"}) for m in d.milestones],
             })  # fmt: skip
         return {
             "campaign_id": spec.id,
@@ -520,10 +523,10 @@ class DealService:
         await self.audit(deal.campaign_id, deal.id, actor, "negotiation_round", round=offer.round,
                          fixed=offer.fixed_fee, cpm=offer.cpm, reply=reply.get("kind"), reason=reply.get("reason", ""))  # fmt: skip
 
-    # ---- policy gate → advertiser approval → shielded funding invoice ------------------------------
+    # ---- policy gate → advertiser acceptance → milestone invoices paid directly to the creator ---------------
 
     async def gate(self, deal: Deal, spec: CampaignSpec, agreed: Offer) -> PolicyResult:
-        """Everything that must hold before the advertiser is asked to fund a deal. Failure → BLOCKED.
+        """Everything that must hold before the advertiser is asked to pay a creator. Failure → BLOCKED.
         Passing reserves the deal's cap from the campaign budget atomically (store.reserve_budget)."""
         terms = self._terms(deal)
         result = check_terms(spec, terms, await self.profile(deal.influencer_id), agreed, self.ctx.settings.zcash_network)  # type: ignore[arg-type]
@@ -534,50 +537,76 @@ class DealService:
             deal.policy_violations = result.violations
             await self.save(deal, DealState.BLOCKED)
         else:
-            deal.approved_terms_hash = terms.terms_hash()  # the funding request covers exactly these terms
+            deal.approved_terms_hash = terms.terms_hash()  # the payment request covers exactly these terms
             await self.save(deal, DealState.AWAITING_APPROVAL)
         return result
 
-    def funding_amount(self, deals: list[Deal]) -> Decimal:
-        """What the advertiser pays into the escrow account: every agreed cap plus a ZIP-317 fee reserve per deal."""
-        return sum((self._terms(d).cap for d in deals), Decimal("0")) + self.ctx.settings.zcash_fee_reserve_per_deal * len(deals)
+    def _evidence(self, deal: Deal, kind: str, amount: Decimal, views: int | None) -> dict[str, Any]:
+        terms = self._terms(deal)
+        return {"deal_id": deal.id, "terms_hash": terms.terms_hash(), "kind": kind, "amount": str(amount), "views": views,
+                "video_id": deal.proof.video_id if deal.proof else None,
+                "checks": [c.model_dump() for c in deal.proof.checks] if deal.proof else []}  # fmt: skip
 
-    async def refund_address(self, spec: CampaignSpec) -> str:
-        owner = await self.ctx.store.get_user(spec.owner_id) if spec.owner_id else None
-        return spec.refund_address or (owner.zcash_address if owner else "")
+    async def _request_milestone(self, deal: Deal, kind: str, amount: Decimal, *, views: int | None = None, by: str = "scheduler") -> Deal:
+        """Decides one milestone payment and issues its invoice: paid by the advertiser, from their own wallet,
+        directly to a fresh address of the creator's own receiving account. Idempotent per deal and kind."""
+        terms = self._terms(deal)
+        spec = (await self.campaign(deal.campaign_id)).spec
+        if (existing := deal.milestone(kind)) is not None and existing.invoice_id:
+            return deal
+        check = check_milestone(terms, kind, amount)
+        if not check.ok:
+            await self.audit(deal.campaign_id, deal.id, "policy", "milestone_refused", kind=kind, violations=check.violations)
+            raise DealError("; ".join(check.violations))
+        evidence = self._evidence(deal, kind, amount, views)
+        milestone = existing or Milestone(id=new_id("MS"), kind=kind, amount=amount)  # type: ignore[arg-type]
+        milestone.amount, milestone.views, milestone.evidence, milestone.evidence_hash = amount, views, evidence, evidence_hash(evidence)
+        title = f"{'Fixed fee' if kind == 'fixed' else 'Performance fee'}: {spec.advertiser} sponsorship"
+        invoice = await self.payments.create_invoice(
+            "milestone", spec.owner_id, deal.influencer_id, title, amount, campaign_id=deal.campaign_id, deal_ids=[deal.id],
+            milestone_id=milestone.id, description="Paid directly to the creator's own shielded wallet. Zerveil never holds the funds.",
+        )  # fmt: skip
+        milestone.invoice_id, milestone.status, milestone.requested_at = invoice.id, "requested", self.ctx.clock.now()
+        if existing is None:
+            deal.milestones.append(milestone)
+        deal = await self.save(deal)
+        await self.audit(deal.campaign_id, deal.id, "payments", "milestone_requested", milestone=milestone.id, kind=kind, amount=amount,
+                         invoice=invoice.id, views=views, evidence_hash=milestone.evidence_hash, by=by, simulated=invoice.simulated)  # fmt: skip
+        await self.notify_influencer(deal, "payment_requested", kind=kind, amount=amount, invoice=invoice.id, simulated=invoice.simulated)
+        return deal
 
-    async def request_funding(self, campaign_id: str, deal_ids: list[str], by: str) -> Invoice:
-        """The advertiser approved: one shielded invoice for the approved deals' caps (+ fee reserve). Deals become
-        FUNDED only when the wallet's scanner sees that invoice paid with enough confirmations."""
+    async def request_payment(self, campaign_id: str, deal_ids: list[str], by: str) -> list[Invoice]:
+        """The advertiser accepted the agreements: one fixed-fee invoice per creator, each payable straight to that
+        creator's wallet. A deal moves on to content creation only once the scanner confirms its payment."""
         campaign = await self.campaign(campaign_id)
-        spec = campaign.spec
         deals = [await self.get(i) for i in deal_ids]
         for d in deals:
             if d.state != DealState.AWAITING_APPROVAL:
                 raise DealError(f"deal {d.id} is {d.state}, not awaiting approval")
             if d.approved_terms_hash != self._terms(d).terms_hash():
                 raise DealError(f"deal {d.id}: the terms changed after the policy gate")
-        if not spec.refund_address and (address := await self.refund_address(spec)):
-            spec.refund_address = address
-            await self.save_campaign(campaign)
-        amount = self.funding_amount(deals)
-        check = check_funding(spec, [self._terms(d).cap for d in deals], self.ctx.settings.zcash_fee_reserve_per_deal, amount,
-                              await self.committed_spend(campaign_id))  # fmt: skip
-        if not check.ok:
-            await self.audit(campaign_id, None, "policy", "funding_refused", violations=check.violations)
-            raise DealError("; ".join(check.violations))
-        invoice = await self.payments.create_invoice(
-            "campaign_funding", spec.owner_id, f"Zerveil campaign funding ({len(deals)} creator{'s' if len(deals) != 1 else ''})", amount,
-            description="Held in the Zerveil escrow wallet until each creator's post is verified.", campaign_id=campaign_id,
-            deal_ids=[d.id for d in deals],
-        )  # fmt: skip
+            creator = await self.ctx.store.get_user(d.influencer_id)
+            if creator is None or not creator.receiving_account_id:
+                raise DealError(f"deal {d.id}: the creator has not connected a receiving account, so a payment could not be confirmed")
+        committed = await self.committed_spend(campaign_id)
+        if committed > campaign.spec.budget:
+            raise DealError(f"budget exceeded: {committed} > {campaign.spec.budget}")
+        invoices: list[Invoice] = []
         for d in deals:
-            d.funding_invoice_id = invoice.id
-            await self.save(d, DealState.AWAITING_FUNDING)
-        await self.audit(campaign_id, None, "advertiser-agent", "funding_requested", invoice=invoice.id, amount=amount, deals=[d.id for d in deals],
-                         by=by, simulated=invoice.simulated)  # fmt: skip
+            fixed = self._terms(d).fixed_fee
+            if fixed <= 0:  # CPM-only deals: nothing is due up front
+                await self.save(d, DealState.CONTENT_CREATION)
+                await self.audit(campaign_id, d.id, "payments", "no_upfront_payment", reason="CPM-only deal: no fixed fee")
+                continue
+            d = await self._request_milestone(d, "fixed", fixed, by=by)
+            await self.save(d, DealState.PAYMENT_REQUESTED)
+            milestone = d.milestone("fixed")
+            assert milestone is not None and milestone.invoice_id
+            invoices.append(await self.payments.get_invoice(milestone.invoice_id))
+        await self.audit(campaign_id, None, "advertiser-agent", "payment_requested", invoices=[i.id for i in invoices], deals=deal_ids, by=by,
+                         total=sum((i.amount for i in invoices), Decimal("0")))  # fmt: skip
         await self.refresh_campaign_status(campaign_id)
-        return invoice
+        return invoices
 
     async def reject_agreements(self, campaign_id: str, deal_ids: list[str], by: str) -> None:
         for deal_id in deal_ids:
@@ -587,45 +616,74 @@ class DealService:
         await self.audit(campaign_id, None, "human", "agreements_rejected", deals=deal_ids, by=by)
         await self.refresh_campaign_status(campaign_id)
 
-    async def on_funding_invoice(self, invoice: Invoice) -> None:
-        """Called by the payment scanner whenever a campaign funding invoice changes status."""
+    async def on_milestone_invoice(self, invoice: Invoice) -> None:
+        """Called by the payment scanner whenever a milestone invoice changes status."""
         for deal_id in invoice.deal_ids:
             async with self._deal_lock(deal_id):
                 deal = await self.ctx.store.get_deal(deal_id)
-                if deal is None or deal.funding_invoice_id != invoice.id:
+                if deal is None:
                     continue
-                if invoice.status == "confirming" and deal.state == DealState.AWAITING_FUNDING:
-                    await self.save(deal, DealState.FUNDING)
-                    await self.audit(deal.campaign_id, deal.id, "wallet", "payment_detected", invoice=invoice.id, received=invoice.received,
-                                     confirmations=invoice.confirmations, simulated=invoice.simulated)  # fmt: skip
-                elif invoice.status == "paid" and deal.state in (DealState.AWAITING_FUNDING, DealState.FUNDING):
-                    deal.funded_at, deal.funding_simulated = self.ctx.clock.now(), invoice.simulated
-                    await self.save(deal, DealState.FUNDED)
-                    terms = self._terms(deal)
-                    await self.audit(deal.campaign_id, deal.id, "escrow", "escrow_funded", cap=terms.cap, invoice=invoice.id,
-                                     confirmations=invoice.confirmations, simulated=invoice.simulated)  # fmt: skip
-                    await self.notify_influencer(deal, "funded", amount_locked=terms.cap, network=terms.network, simulated=invoice.simulated)
-                elif invoice.status in ("expired", "cancelled") and deal.state == DealState.AWAITING_FUNDING:
-                    await self.save(deal, DealState.PAYMENT_EXPIRED)
-                    await self.audit(deal.campaign_id, deal.id, "wallet", "funding_expired", invoice=invoice.id, received=invoice.received)
+                milestone = next((m for m in deal.milestones if m.invoice_id == invoice.id), None)
+                if milestone is None:
+                    continue
+                now = self.ctx.clock.now()
+                if invoice.status in ("seen", "mined", "confirming") and milestone.status == "requested":
+                    milestone.status = "pending"
+                    if milestone.kind == "fixed" and deal.state == DealState.PAYMENT_REQUESTED:
+                        await self.save(deal, DealState.PAYMENT_PENDING)
+                    else:
+                        await self.save(deal)
+                    await self.audit(deal.campaign_id, deal.id, "scanner", "payment_detected", milestone=milestone.id, invoice=invoice.id,
+                                     received=invoice.received, confirmations=invoice.confirmations, simulated=invoice.simulated)  # fmt: skip
+                elif invoice.is_paid and milestone.status in ("requested", "pending"):
+                    milestone.status, milestone.confirmed_at, milestone.receipt_id = "confirmed", now, invoice.receipt_id
+                    deal.payment_simulated = deal.payment_simulated or invoice.simulated
+                    await self.audit(deal.campaign_id, deal.id, "scanner", "payment_confirmed", milestone=milestone.id, kind=milestone.kind,
+                                     invoice=invoice.id, received=invoice.received, confirmations=invoice.confirmations,
+                                     receipt=invoice.receipt_id, simulated=invoice.simulated)  # fmt: skip
+                    if milestone.kind == "fixed" and deal.state in (DealState.PAYMENT_REQUESTED, DealState.PAYMENT_PENDING):
+                        await self.save(deal, DealState.CONTENT_CREATION)
+                        await self.notify_influencer(deal, "payment_confirmed", kind="fixed", amount=invoice.received, receipt=invoice.receipt_id,
+                                                     simulated=invoice.simulated)  # fmt: skip
+                    elif milestone.kind == "performance" and deal.state == DealState.PERFORMANCE_DUE:
+                        await self.save(deal, DealState.COMPLETED)
+                        await self.audit(deal.campaign_id, deal.id, "payments", "deal_completed", views=milestone.views)
+                    else:
+                        await self.save(deal)
+                elif invoice.status in ("expired", "cancelled") and milestone.status == "requested":
+                    milestone.status = "expired"
+                    await self.audit(deal.campaign_id, deal.id, "scanner", "payment_expired", milestone=milestone.id, kind=milestone.kind,
+                                     invoice=invoice.id, received=invoice.received)  # fmt: skip
+                    if milestone.kind == "fixed" and deal.state in (DealState.PAYMENT_REQUESTED, DealState.PAYMENT_PENDING):
+                        await self.save(deal, DealState.PAYMENT_EXPIRED)
+                    elif milestone.kind == "performance" and deal.state == DealState.PERFORMANCE_DUE:
+                        await self.save(deal, DealState.COMPLETED)
+                        await self.audit(deal.campaign_id, deal.id, "payments", "deal_completed", views=milestone.views,
+                                         note="the performance invoice expired unpaid")  # fmt: skip
+                    else:
+                        await self.save(deal)
         if invoice.campaign_id:
             await self.refresh_campaign_status(invoice.campaign_id)
 
-    async def funding_summary(self, campaign_id: str) -> dict[str, str]:
-        """Budget is a spending limit, not money held: reserved = caps of deals that may still be paid or were paid."""
+    async def payment_summary(self, campaign_id: str) -> dict[str, str]:
+        """Budget is a spending limit, not money held: reserved = caps of deals that may still be paid or were paid;
+        paid = milestone payments the scanner confirmed in creators' wallets."""
         spec = (await self.campaign(campaign_id)).spec
         reserved = await self.ctx.store.reserved_budget(campaign_id)
-        funded = sum((d.terms.cap for d in await self.ctx.store.list_deals(campaign_id) if d.funded_at and d.terms), Decimal("0"))
-        return {"budget": str(spec.budget), "reserved": str(reserved), "funded": str(funded), "remaining": str(spec.budget - reserved)}
+        deals = await self.ctx.store.list_deals(campaign_id)
+        paid = sum((m.amount for d in deals for m in d.milestones if m.status == "confirmed"), Decimal("0"))
+        requested = sum((m.amount for d in deals for m in d.milestones if m.status in ("requested", "pending")), Decimal("0"))
+        return {"budget": str(spec.budget), "reserved": str(reserved), "paid": str(paid), "requested": str(requested),
+                "remaining": str(spec.budget - reserved)}  # fmt: skip
 
     def _deal_lock(self, deal_id: str) -> asyncio.Lock:
         return self._deal_locks.setdefault(deal_id, asyncio.Lock())
 
-    # ---- proof + payouts -----------------------------------------------------
+    # ---- proof + performance milestone ----------------------------------------------------------------------
 
     async def submit_proof(self, deal_id: str, video_ref: str, attestations: dict[str, bool] | None = None) -> Deal:
         deal = await self.get(deal_id)
-        if deal.state not in (DealState.FUNDED, DealState.PROOF_REJECTED):
+        if deal.state not in (DealState.CONTENT_CREATION, DealState.PROOF_REJECTED):
             raise DealError(f"deal is {deal.state}, not awaiting proof")
         video_id = parse_video_id(video_ref)
         if video_id is None:
@@ -633,7 +691,7 @@ class DealService:
         if self.ctx.videos is None:
             raise DealError("the verifier is offline: set YOUTUBE_API_KEY")
         if self.ctx.clock.now() > self._terms(deal).publish_by:
-            raise DealError("the publish deadline has passed: the advertiser's escrow is refunded for this deal")
+            raise DealError("the publish deadline has passed")
         spec = (await self.campaign(deal.campaign_id)).spec
         video = await self.ctx.videos.get_video(video_id)
         assert deal.agreed_at is not None
@@ -664,13 +722,11 @@ class DealService:
                              resubmit_by=review.resubmit_by, issues=[i.check for i in review.issues])  # fmt: skip
             return await self.save(deal, DealState.PROOF_REJECTED)
         terms = self._terms(deal)
-        # The fixed fee is due as soon as the proof is verified; the performance fee still waits for the day-7 views,
-        # and that re-check is also what catches a video taken down after the fixed payout
-        deal.fixed_release_due = now
+        # The performance fee waits for the day-7 views; that re-check also catches a video taken down meanwhile
         assert video is not None
-        deal.performance_due = max(video.published_at + timedelta(days=terms.views_measured_after_days), deal.fixed_release_due)
+        deal.performance_due = max(video.published_at + timedelta(days=terms.views_measured_after_days), now)
         await self.save(deal, DealState.VERIFIED)
-        deal = await self.release_due(deal.id)
+        deal = await self.advance_due(deal.id)
         await self.refresh_campaign_status(deal.campaign_id)
         return deal
 
@@ -683,8 +739,8 @@ class DealService:
         return checks
 
     async def compliance_review(self, deal_id: str, reviewer: str, approved: bool, note: str) -> Deal:
-        """The advertiser's disclosure review of a verified post. Approval unblocks the fixed fee; rejection sends
-        the proof back, and the creator can resubmit until the publish deadline."""
+        """The advertiser's disclosure review of a verified post. Approval accepts the content (the performance
+        milestone follows at T+7d); rejection sends the proof back, and the creator can resubmit until the deadline."""
         deal = await self.get(deal_id)
         if deal.state != DealState.VERIFIED:
             raise DealError(f"deal is {deal.state}: only verified posts can be reviewed")
@@ -697,7 +753,7 @@ class DealService:
                              can_resubmit=deal.proof.review.can_resubmit, resubmit_by=deal.proof.review.resubmit_by)  # fmt: skip
             deal = await self.save(deal, DealState.PROOF_REJECTED)
         else:
-            deal = await self.release_due(deal.id)  # the review was the only thing holding the fixed fee
+            deal = await self.advance_due(deal.id)  # the review was the only thing holding the content back
             await self.refresh_campaign_status(deal.campaign_id)
         return deal
 
@@ -715,53 +771,56 @@ class DealService:
     async def dispute(self, deal_id: str, reason: str) -> Deal:
         deal = await self.get(deal_id)
         if deal.state != DealState.VERIFIED:
-            raise DealError("disputes are only possible while the fixed fee is still held (awaiting your review)")
+            raise DealError("disputes are only possible while the post awaits your review")
         await self.audit(deal.campaign_id, deal.id, "human", "disputed", reason=reason)
         return await self.save(deal, DealState.DISPUTED)
 
     async def tick(self) -> int:
-        """Scheduler: scan the wallet for payments, decide refunds and payouts that are due, move the payout queue.
+        """Scheduler: scan watched accounts for payments, then decide milestones and deadlines that are due.
         Returns the number of actions taken."""
-        actions = await self.payments.scan()  # wallet data first: funding that arrived moves deals to FUNDED
+        actions = await self.payments.scan() if self.ctx.settings.zcash_payment_scanner_enabled or self.ctx.wallet.simulated else 0
         now = self.ctx.clock.now()
         for deal in await self.ctx.store.list_deals():
-            if not await self._payout_due(deal, now):
+            if not await self._due(deal, now):
                 continue
             before = deal.state
-            deal = await self.release_due(deal.id)
+            deal = await self.advance_due(deal.id)
             if deal.state != before:
                 actions += 1
             await self.refresh_campaign_status(deal.campaign_id)
-        return actions + await self.payments.process_payouts()
+        return actions
 
-    async def _payout_due(self, deal: Deal, now: datetime) -> bool:
-        if deal.state in (DealState.FUNDED, DealState.PROOF_REJECTED):
+    async def _due(self, deal: Deal, now: datetime) -> bool:
+        if deal.state in (DealState.CONTENT_CREATION, DealState.PROOF_REJECTED):
             return now > self._terms(deal).publish_by
         if deal.state == DealState.VERIFIED:
-            # the advertiser's disclosure review, when the campaign asks for one, gates the fixed fee
-            return bool(deal.fixed_release_due and now >= deal.fixed_release_due) and not self.review_pending(
-                deal, (await self.campaign(deal.campaign_id)).spec
-            )
-        if deal.state == DealState.FIXED_RELEASED:
-            return bool(deal.performance_due and now >= deal.performance_due)
+            # the advertiser's disclosure review, when the campaign asks for one, gates the performance milestone
+            return not self.review_pending(deal, (await self.campaign(deal.campaign_id)).spec)
+        if deal.state == DealState.PERFORMANCE_DUE:
+            m = deal.milestone("performance")
+            return (m is None or m.status == "scheduled") and bool(deal.performance_due and now >= deal.performance_due)
         return False
 
-    async def release_due(self, deal_id: str) -> Deal:
-        """Decides whatever payout is due for one deal now. Callers race (the scheduler, a verified proof, an approved
-        review): the deal lock, a fresh read and the per-deal payout key make sure each payout is decided once."""
+    async def advance_due(self, deal_id: str) -> Deal:
+        """Moves one deal on when something is due. Callers race (the scheduler, a verified proof, an approved
+        review): the deal lock, a fresh read and the per-deal milestone check make sure each step happens once."""
         async with self._deal_lock(deal_id):
             deal = await self.get(deal_id)
-            if not await self._payout_due(deal, self.ctx.clock.now()):
+            if not await self._due(deal, self.ctx.clock.now()):
                 return deal
             try:
                 if deal.state == DealState.VERIFIED:
-                    await self._release_fixed(deal)
-                elif deal.state == DealState.FIXED_RELEASED:
-                    await self._release_performance(deal)
+                    await self.save(deal, DealState.PERFORMANCE_DUE)
+                    await self.audit(deal.campaign_id, deal.id, "verifier", "content_accepted", performance_due=deal.performance_due)
+                elif deal.state == DealState.PERFORMANCE_DUE:
+                    await self._performance_milestone(deal)
                 else:
-                    await self._refund_expired(deal)
+                    await self.save(deal, DealState.UNDELIVERED)
+                    await self.audit(deal.campaign_id, deal.id, "verifier", "deadline_missed", publish_by=self._terms(deal).publish_by,
+                                     note="no accepted post by the deadline; the fixed fee was already paid to the creator, so the "
+                                     "advertiser and creator settle it between them (Zerveil holds no funds)")  # fmt: skip
             except (PaymentError, DealError) as e:
-                await self.audit(deal.campaign_id, deal.id, "escrow", "payout_error", reason=str(e))
+                await self.audit(deal.campaign_id, deal.id, "payments", "milestone_error", reason=str(e))
             return await self.get(deal_id)
 
     async def _recheck(self, deal: Deal) -> tuple[bool, int]:
@@ -773,72 +832,21 @@ class DealService:
         checks = check_video(self._terms(deal), video, deal.agreed_at, spec.brand_handle)
         return all_passed(checks), video.views if video else 0
 
-    def _paid(self, deal: Deal, kind: str) -> bool:
-        return any(p.kind == kind for p in deal.payouts)
-
-    async def _release(self, deal: Deal, amount: Decimal, kind: str, views: int | None) -> Deal:
-        """Decides one payout and queues it (idempotent per deal and kind). The wallet sends it from the escrow
-        account once an operator approves it (PAYOUT_APPROVAL_REQUIRED) — see payments.service."""
-        terms = self._terms(deal)
-        spec = (await self.campaign(deal.campaign_id)).spec
-        refund = kind == "refund"
-        to = await self.refund_address(spec) if refund else terms.payee
-        beneficiary = spec.owner_id if refund else deal.influencer_id
-        evidence = {"deal_id": deal.id, "terms_hash": terms.terms_hash(), "kind": kind, "amount": str(amount), "views": views,
-                    "video_id": deal.proof.video_id if deal.proof else None,
-                    "checks": [c.model_dump() for c in deal.proof.checks] if deal.proof else []}  # fmt: skip
-        payout = await self.payments.request_payout(kind, to, amount, f"{kind} payout for deal {deal.id}", key=f"{deal.id}:{kind}",  # type: ignore[arg-type]
-                                                    beneficiary_id=beneficiary, campaign_id=deal.campaign_id, deal_id=deal.id,
-                                                    evidence=evidence)  # fmt: skip
-        if payout is None:
-            return deal
-        if not any(p.payout_id == payout.id for p in deal.payouts):
-            deal.payouts.append(Payout(payout_id=payout.id, kind=kind, to=to, amount=payout.amount, at=self.ctx.clock.now(), views=views,  # type: ignore[arg-type]
-                                       evidence_hash=payout.evidence_hash, simulated=payout.simulated))  # fmt: skip
-            deal = await self.save(deal)
-            await self.audit(deal.campaign_id, deal.id, "escrow", "payout_decided" if kind != "refund" else "refund_decided", payout=payout.id,
-                             kind=kind, amount=payout.amount, status=payout.status, views=views, evidence_hash=payout.evidence_hash)  # fmt: skip
-            if not refund:
-                await self.notify_influencer(deal, "payout", kind=kind, amount=payout.amount, payout=payout.id, status=payout.status)
-        return deal
-
-    async def _refund_remainder(self, deal: Deal) -> Deal:
-        """Whatever the deal can no longer pay goes back to the advertiser's refund address."""
-        terms = self._terms(deal)
-        paid = sum((p.amount for p in deal.payouts if p.kind != "refund"), Decimal("0"))
-        if not self._paid(deal, "refund"):
-            deal = await self._release(deal, terms.cap - paid, "refund", None)
-        return deal
-
-    async def _release_fixed(self, deal: Deal) -> None:
-        if not self._paid(deal, "fixed"):
-            still_ok, _ = await self._recheck(deal)
-            if not still_ok:
-                await self.audit(deal.campaign_id, deal.id, "verifier", "post_removed_before_release")
-                await self.save(deal, DealState.PROOF_REJECTED)
-                return
-            if self._terms(deal).fixed_fee > 0:  # CPM-only deals have no fixed fee
-                deal = await self._release(deal, self._terms(deal).fixed_fee, "fixed", None)
-        await self.save(deal, DealState.FIXED_RELEASED)
-
-    async def _release_performance(self, deal: Deal) -> None:
-        views: int | None = None
-        if not self._paid(deal, "performance"):
-            still_ok, views = await self._recheck(deal)
-            amount = performance_payout(self._terms(deal), views) if still_ok else Decimal("0")
-            if amount > 0:
-                deal = await self._release(deal, amount, "performance", views)
-        deal = await self._refund_remainder(deal)
-        performance = sum((p.amount for p in deal.payouts if p.kind == "performance"), Decimal(0))
-        refund = sum((p.amount for p in deal.payouts if p.kind == "refund"), Decimal(0))
-        await self.audit(deal.campaign_id, deal.id, "escrow", "deal_closed", views=views, performance=performance, refunded=refund)
+    async def _performance_milestone(self, deal: Deal) -> None:
+        """At T+7d: re-check the post, compute the performance fee from verified views (deterministic), and request
+        it. Nothing due → the deal completes."""
+        still_ok, views = await self._recheck(deal)
+        amount = performance_payout(self._terms(deal), views) if still_ok else Decimal("0")
+        if not still_ok:
+            await self.audit(deal.campaign_id, deal.id, "verifier", "post_removed_before_performance", views=views)
+        if amount > 0:
+            await self._request_milestone(deal, "performance", amount, views=views)
+            return
+        evidence = self._evidence(deal, "performance", Decimal("0"), views)
+        deal.milestones.append(Milestone(id=new_id("MS"), kind="performance", amount=Decimal("0"), status="waived", views=views,
+                                         evidence=evidence, evidence_hash=evidence_hash(evidence)))  # fmt: skip
         await self.save(deal, DealState.COMPLETED)
-
-    async def _refund_expired(self, deal: Deal) -> None:
-        deal = await self._refund_remainder(deal)
-        refund = sum((p.amount for p in deal.payouts if p.kind == "refund"), Decimal(0))
-        await self.audit(deal.campaign_id, deal.id, "escrow", "expired_refunded", refunded=refund)
-        await self.save(deal, DealState.EXPIRED_REFUNDED)
+        await self.audit(deal.campaign_id, deal.id, "payments", "deal_completed", views=views, performance=Decimal("0"))
 
     @staticmethod
     def _terms(deal: Deal) -> DealTerms:

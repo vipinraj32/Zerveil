@@ -1,11 +1,11 @@
 """Wires backends from settings.
 
-Payments: PAYMENT_MODE=zcash uses a real Zcash wallet over JSON-RPC (Zallet) and refuses to start without it; it
-never falls back to the simulated wallet. PAYMENT_MODE=simulated runs the same invoice, scanning and payout code
-against an in-process stand-in whose records are all labeled simulated.
+Payments: PAYMENT_MODE=zcash uses a real view-only payment scanner (zcash-devtool against lightwalletd) on Zcash
+testnet and refuses to start without it; it never falls back to simulation. PAYMENT_MODE=simulated runs the same
+invoice and scanning code against an in-process stand-in whose records are all labeled simulated.
 
-The server holds no advertiser or creator wallet keys: advertisers pay from their own Zcash wallet, creators are paid
-to their own shielded addresses. The escrow wallet's keys stay inside the wallet process."""
+The server holds no funds and no spending keys: advertisers pay from their own Zcash wallet directly to the creator's
+own wallet. The scanner only holds viewing keys the recipients connected."""
 
 from __future__ import annotations
 
@@ -23,8 +23,8 @@ from ..store import MemoryStore, PostgresStore, Store
 from ..verifier.channels import ChannelSource, YouTubeChannelApi
 from ..verifier.content import CaptionSource, FrameSource, YouTubeCaptions, YouTubeFrames
 from ..verifier.youtube import VideoSource, YouTubeDataApi
-from ..zcash.address import UA_HRP, unified_address_problem
-from ..zcash.wallet import ZcashWallet
+from ..zcash.address import UA_HRP
+from ..zcash.wallet import PaymentScanner
 from .events import EventBus
 from .registry import InfluencerRegistry
 
@@ -34,7 +34,7 @@ class AppContext:
     settings: Settings
     store: Store
     clock: Clock
-    wallet: ZcashWallet
+    wallet: PaymentScanner  # view-only payment scanner
     videos: VideoSource | None  # None until YOUTUBE_API_KEY is set: proofs cannot be verified
     a2a: A2AConnector
     llm: BaseChatModel | None
@@ -57,47 +57,39 @@ def chat_model(settings: Settings) -> BaseChatModel | None:
 
 def zcash_mode_missing(settings: Settings) -> list[str]:
     """Configuration PAYMENT_MODE=zcash cannot run without."""
-    required = {
-        "ZCASH_WALLET_RPC_URL": settings.zcash_wallet_rpc_url,
-        "ZCASH_ESCROW_ACCOUNT": settings.zcash_escrow_account,
-        "ZCASH_ESCROW_FROM_ADDRESS": settings.zcash_escrow_from_address,
-    }
-    missing = [name for name, value in required.items() if not value]
-    if settings.zcash_network not in UA_HRP:
-        missing.append(f"ZCASH_NETWORK (testnet, mainnet or regtest; got {settings.zcash_network!r})")
-    elif settings.zcash_escrow_from_address and (problem := unified_address_problem(settings.zcash_escrow_from_address, settings.zcash_network)):  # type: ignore[arg-type]
-        missing.append(f"ZCASH_ESCROW_FROM_ADDRESS ({problem})")
+    missing = [name for name, value in {"ZCASH_DEVTOOL_WALLET_DIR": settings.zcash_devtool_wallet_dir,
+                                        "ZCASH_LIGHTWALLETD_URL": settings.zcash_lightwalletd_url}.items() if not value]  # fmt: skip
+    if settings.zcash_wallet_backend != "zcash-devtool":
+        missing.append(f"ZCASH_WALLET_BACKEND=zcash-devtool (got {settings.zcash_wallet_backend!r}; no other real scanner is supported)")
+    if settings.zcash_network != "testnet" or not settings.zcash_testnet_enabled:
+        missing.append(f"ZCASH_NETWORK=testnet with ZCASH_TESTNET_ENABLED=true (got {settings.zcash_network!r}; this MVP runs on testnet only)")
     return missing
 
 
-def build_wallet(settings: Settings) -> tuple[ZcashWallet, list[str]]:
+def build_wallet(settings: Settings) -> tuple[PaymentScanner, list[str]]:
     if settings.payment_mode == PaymentMode.ZCASH:
         missing = zcash_mode_missing(settings)
         if missing:
             raise RuntimeError("PAYMENT_MODE=zcash is unavailable, missing: " + ", ".join(missing))
-        from ..zcash.rpc import ZalletRpcWallet
+        import shutil
 
-        wallet = ZalletRpcWallet(
-            settings.zcash_wallet_rpc_url,
+        from ..zcash.devtool import DevtoolScanner, server_arg
+
+        if shutil.which(settings.zcash_devtool_bin) is None:
+            raise RuntimeError(f'PAYMENT_MODE=zcash: zcash-devtool binary not found ({settings.zcash_devtool_bin}); see README, "Wallet setup"')
+        scanner = DevtoolScanner(
+            binary=settings.zcash_devtool_bin,
+            wallet_dir=settings.zcash_devtool_wallet_dir,
+            server=server_arg(settings.zcash_lightwalletd_url),
             network=settings.zcash_network,
-            account=settings.zcash_escrow_account,
-            from_address=settings.zcash_escrow_from_address,
-            user=settings.zcash_wallet_rpc_user,
-            password=settings.zcash_wallet_rpc_password,
-            receiver_types=[r.strip() for r in settings.zcash_receiver_types.split(",") if r.strip()],
-            privacy_policy=settings.zcash_privacy_policy,
-            send_minconf=settings.zcash_send_minconf,
+            receiver_pools=tuple(r.strip() for r in settings.zcash_receiver_types.split(",") if r.strip()),
+            timeout_seconds=settings.zcash_scanner_timeout_seconds,
         )
-        warnings = [f"PAYMENT_MODE=zcash: real shielded payments on Zcash {settings.zcash_network} through the wallet at the configured RPC URL"]
-        if settings.zcash_network == "mainnet":
-            warnings.append("ZCASH_NETWORK=mainnet: this MVP is built and tested for testnet; real ZEC is at risk")
-        return wallet, warnings
-    from ..zcash.simulated import SimulatedZcashWallet
+        return scanner, [f"PAYMENT_MODE=zcash: direct shielded payments on Zcash testnet, confirmed by zcash-devtool via {scanner.server}"]
+    from ..zcash.simulated import SimulatedScanner
 
     network = settings.zcash_network if settings.zcash_network in UA_HRP else "testnet"
-    return SimulatedZcashWallet(network=network), [
-        "PAYMENT_MODE=simulated: invoices, scanning and payouts run against an in-process wallet stand-in; no ZEC moves"
-    ]
+    return SimulatedScanner(network=network), ["PAYMENT_MODE=simulated: invoices and scanning run against an in-process stand-in; no ZEC moves"]
 
 
 async def build_context(
@@ -105,7 +97,7 @@ async def build_context(
     a2a_http: httpx.AsyncClient | None = None,
     clock: Clock | None = None,
     llm: BaseChatModel | None = None,
-    wallet: ZcashWallet | None = None,
+    wallet: PaymentScanner | None = None,
 ) -> AppContext:
     warnings: list[str] = []
     clock = clock or Clock()
@@ -126,7 +118,7 @@ async def build_context(
         secret = secrets.token_hex(32)
         warnings.append("SESSION_SECRET not set: sessions and influencer agent keys reset on restart")
     if not settings.admins:
-        warnings.append("ADMIN_EMAILS not set: nobody can approve payouts")
+        warnings.append("ADMIN_EMAILS not set: nobody can see payment events and scanner status")
 
     videos: VideoSource | None = None
     channels: ChannelSource | None = None

@@ -9,22 +9,27 @@ import { useMe, useSession } from "../../session";
 import type { Campaign, Deal, DealState } from "../../types";
 import "./dashboard.css";
 
-/** Deals whose cap is (or was) locked in escrow. */
-const ESCROWED: DealState[] = ["FUNDED", "PROOF_SUBMITTED", "PROOF_REJECTED", "VERIFIED", "FIXED_RELEASED", "DISPUTED"];
+/** Deals that are live: the fixed fee is settled and the creator is posting, being verified or measured. */
+const LIVE: DealState[] = ["CONTENT_CREATION", "PROOF_SUBMITTED", "PROOF_REJECTED", "VERIFIED", "PERFORMANCE_DUE", "DISPUTED"];
 /** Deals that wait on the advertiser or need a look. */
-const ATTENTION: DealState[] = ["AWAITING_APPROVAL", "AWAITING_FUNDING", "ESCALATED", "DISPUTED", "BLOCKED"];
+const ATTENTION: DealState[] = ["AWAITING_APPROVAL", "PAYMENT_REQUESTED", "ESCALATED", "DISPUTED", "BLOCKED"];
 
 const PIPELINE: { label: string; states: DealState[]; tone: string }[] = [
   { label: "Negotiating", states: ["NEGOTIATING", "AGREED"], tone: "blue" },
-  { label: "Awaiting you", states: ["AWAITING_APPROVAL", "AWAITING_FUNDING", "ESCALATED", "BLOCKED"], tone: "orange" },
-  { label: "Confirming payment", states: ["FUNDING"], tone: "blue-soft" },
-  { label: "Live in escrow", states: ESCROWED, tone: "ink" },
+  { label: "Awaiting you", states: ["AWAITING_APPROVAL", "PAYMENT_REQUESTED", "ESCALATED", "BLOCKED"], tone: "orange" },
+  { label: "Confirming payment", states: ["PAYMENT_PENDING"], tone: "blue-soft" },
+  { label: "Live", states: LIVE, tone: "ink" },
   { label: "Completed", states: ["COMPLETED"], tone: "blue" },
-  { label: "Closed", states: ["REJECTED", "PAYMENT_EXPIRED", "EXPIRED_REFUNDED", "ARCHIVED"], tone: "muted" },
+  { label: "Closed", states: ["REJECTED", "PAYMENT_EXPIRED", "UNDELIVERED", "ARCHIVED"], tone: "muted" },
 ];
 
 const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
-const paidOut = (d: Deal, kinds: string[]) => sum(d.payouts.filter((p) => kinds.includes(p.kind)).map((p) => Number(p.amount)));
+/** Milestone payments the scanner confirmed in the creator's wallet (plus legacy history of archived deals). */
+const paidTo = (d: Deal) =>
+  sum((d.milestones ?? []).filter((m) => m.status === "confirmed").map((m) => Number(m.amount))) +
+  sum(d.payouts.filter((p) => p.kind !== "refund").map((p) => Number(p.amount)));
+/** Milestone payments requested from the advertiser and not yet confirmed. */
+const requestedOf = (d: Deal) => sum((d.milestones ?? []).filter((m) => m.status === "requested" || m.status === "pending").map((m) => Number(m.amount)));
 
 export async function loadDeals(): Promise<Deal[]> {
   const campaigns = await api.campaigns();
@@ -55,9 +60,8 @@ export function AdvertiserHome() {
   for (const d of allDeals) byCampaign.set(d.campaign_id, [...(byCampaign.get(d.campaign_id) ?? []), d]);
 
   const budget = sum(list.map((c) => Number(c.spec.budget)));
-  const paid = sum(allDeals.map((d) => paidOut(d, ["fixed", "performance"])));
-  const refunded = sum(allDeals.map((d) => paidOut(d, ["refund"])));
-  const locked = sum(allDeals.filter((d) => ESCROWED.includes(d.state)).map((d) => Number(d.terms?.cap ?? 0) - paidOut(d, ["fixed", "performance", "refund"])));
+  const paid = sum(allDeals.map(paidTo));
+  const requested = sum(allDeals.map(requestedOf));
   const agreed = allDeals.filter((d) => d.terms && d.state !== "REJECTED").length;
   const inProgress = list.filter((c) => !["done", "failed"].includes(c.status)).length;
   const attention = [
@@ -95,8 +99,8 @@ export function AdvertiserHome() {
 
       <section className="kpis" aria-label="Summary">
         <Kpi icon="ledger" label="Total budget" value={zec(budget)} foot={`${list.length} campaign${list.length === 1 ? "" : "s"} · ${inProgress} in progress`} />
-        <Kpi icon="shield" label="Locked in escrow" value={zec(locked)} foot={simulated ? "Simulated payments · no ZEC moves" : `Shielded ${status?.zcash.ticker ?? "ZEC"} · escrow wallet`} tone="blue" />
-        <Kpi icon="check" label="Paid to creators" value={zec(paid)} foot={`${zec(refunded)} refunded to you`} tone="orange" />
+        <Kpi icon="shield" label="Payments requested" value={zec(requested)} foot={simulated ? "Simulated — no ZEC moved" : `Shielded ${status?.zcash.ticker ?? "ZEC"} · paid from your wallet`} tone="blue" />
+        <Kpi icon="check" label="Paid to creators" value={zec(paid)} foot="Confirmed in creators' wallets" tone="orange" />
         <Kpi icon="agents" label="Deals agreed" value={num(agreed)} foot={`${num(directory.data?.length ?? 0)} creator agents live`} />
       </section>
 
@@ -111,7 +115,7 @@ export function AdvertiserHome() {
           {loading ? (
             <Spinner />
           ) : list.length === 0 ? (
-            <GetStarted hasAddress={!!user.zcash_address} />
+            <GetStarted hasProfile={!!(user.company && user.brand_handle)} />
           ) : (
             <CampaignList campaigns={list} byCampaign={byCampaign} />
           )}
@@ -179,12 +183,7 @@ export function AdvertiserHome() {
                 Open <Icon name="arrow" size={16} />
               </Link>
             </header>
-            {!user.zcash_address ? (
-              <p className="panel-empty">
-                Add a shielded refund address before your first campaign. <Link to="/account">Add address</Link>
-              </p>
-            ) : (
-              <div className="wallet-body">
+            <div className="wallet-body">
                 <span className="wallet-ic">
                   <Icon name="wallet" size={22} />
                 </span>
@@ -194,12 +193,12 @@ export function AdvertiserHome() {
                     {wallet.data?.simulated ? " · simulated" : ""}
                   </strong>
                   <span className="muted small">
-                    {wallet.data ? (wallet.data.reachable ? "Escrow wallet online" : "Escrow wallet unreachable") : wallet.loading ? "…" : "Status unavailable"} · refund
-                    address set
+                    {wallet.data ? (wallet.data.reachable ? "Payment scanner online" : "Payment scanner unreachable") : wallet.loading ? "…" : "Status unavailable"} · you
+                    pay creators directly from your own wallet
                   </span>
+                  {status?.zcash.testnet_notice && <span className="muted small">{status.zcash.testnet_notice}</span>}
                 </div>
-              </div>
-            )}
+            </div>
           </section>
         </div>
       </div>
@@ -252,7 +251,7 @@ function Kpi({ icon, label, value, foot, tone = "" }: { icon: string; label: str
 
 const FILTERS: { key: string; label: string; match: (c: Campaign) => boolean }[] = [
   { key: "all", label: "All", match: () => true },
-  { key: "progress", label: "In progress", match: (c) => ["planning", "negotiating", "awaiting_approval", "funding"].includes(c.status) },
+  { key: "progress", label: "In progress", match: (c) => ["planning", "negotiating", "awaiting_approval", "awaiting_payment"].includes(c.status) },
   { key: "active", label: "Active", match: (c) => c.status === "active" },
   { key: "done", label: "Done", match: (c) => c.status === "done" },
   { key: "failed", label: "Failed", match: (c) => c.status === "failed" },
@@ -344,8 +343,8 @@ export function CampaignList({ campaigns, byCampaign, pageSize = 5 }: { campaign
 
 function CampaignRow({ campaign: c, deals }: { campaign: Campaign; deals: Deal[] }) {
   const budget = Number(c.spec.budget) || 0;
-  const paid = sum(deals.map((d) => paidOut(d, ["fixed", "performance"])));
-  const committed = sum(deals.filter((d) => ESCROWED.includes(d.state)).map((d) => Number(d.terms?.cap ?? 0) - paidOut(d, ["fixed", "performance", "refund"])));
+  const paid = sum(deals.map(paidTo));
+  const committed = sum(deals.map(requestedOf));
   const agreed = deals.filter((d) => d.terms && d.state !== "REJECTED").length;
   const pct = (v: number) => `${budget ? Math.min(100, (v / budget) * 100) : 0}%`;
   return (
@@ -361,7 +360,7 @@ function CampaignRow({ campaign: c, deals }: { campaign: Campaign; deals: Deal[]
           </span>
           <CampaignBadge status={c.status} />
         </span>
-        <span className="camp-bar" title={`Paid ${zec(paid)} · in escrow ${zec(committed)} of ${zec(budget)}`}>
+        <span className="camp-bar" title={`Paid ${zec(paid)} · requested ${zec(committed)} of ${zec(budget)} budget`}>
           <span className="fill fill-orange" style={{ width: pct(paid) }} />
           <span className="fill fill-blue" style={{ width: pct(committed) }} />
         </span>
@@ -382,9 +381,9 @@ function CampaignRow({ campaign: c, deals }: { campaign: Campaign; deals: Deal[]
   );
 }
 
-function GetStarted({ hasAddress }: { hasAddress: boolean }) {
+function GetStarted({ hasProfile }: { hasProfile: boolean }) {
   const steps = [
-    { done: hasAddress, title: "Add a refund address", text: "A shielded Unified Address for unused funds.", to: "/account" },
+    { done: hasProfile, title: "Complete your profile", text: "Company and brand handle. You pay creators from your own wallet.", to: "/account" },
     { done: false, title: "Set up your agent", text: "Budgets, ceilings and how it negotiates.", to: "/advertiser/agent" },
     { done: false, title: "Launch a campaign", text: "Your agent contacts matching creators.", to: "/advertiser/new" },
   ];

@@ -1,16 +1,17 @@
 """Advertiser Agent graph.
 
-    discover ──▶ negotiate_next ──▶ prepare_payments ──▶ approval ──▶ request_funding ──▶ END
-    (Agent Cards,   ↺ one creator     (policy gate on        (interrupt:   (one shielded Zcash invoice
-     queue one       per step, in      the signed terms,      the advertiser for the approved caps;
-     session per     selection order)  budget reserved)       approves)     the wallet scanner funds deals)
+    discover ──▶ negotiate_next ──▶ prepare_payments ──▶ approval ──▶ request_payment ──▶ END
+    (Agent Cards,   ↺ one creator     (policy gate on        (interrupt:   (one fixed-fee invoice per creator,
+     queue one       per step, in      the signed terms,      the advertiser paid by the advertiser's wallet
+     session per     selection order)  budget reserved)       accepts)      directly to the creator's wallet)
 
 Creators are negotiated with one at a time. Each `negotiate_next` step runs one creator's whole negotiation and is
 checkpointed, so a restarted server resumes with the next creator; a negotiation that was cut off mid-way is closed
 as FAILED (never re-run), and a rejected, failed or timed-out creator never blocks the ones after it.
 
 The LLM only appears inside `negotiate` (proposals, bounded by the policy). No payment depends on LLM output: the
-policy gate and the funding check are deterministic, the advertiser approves, and the advertiser's own Zcash wallet pays.
+policy gate and the milestone check are deterministic, the advertiser approves, and the advertiser's own Zcash wallet
+pays the creator's own wallet directly. Zerveil holds no funds.
 """
 
 from __future__ import annotations
@@ -273,24 +274,24 @@ def build_advertiser_graph(deals: DealService, checkpointer: BaseCheckpointSaver
         gated = [await deals.get(i) for i in state["gated"]]
         await deals.refresh_campaign_status(state["campaign_id"])
         total = sum(d.terms.cap for d in gated if d.terms)
-        decision = interrupt({"campaign_id": state["campaign_id"], "deals": state["gated"], "total": str(total),
-                              "invoice_amount": str(deals.funding_amount(gated)), "network": f"zcash-{ctx.settings.zcash_network}",
-                              "fee_reserve_per_deal": str(ctx.settings.zcash_fee_reserve_per_deal)})  # fmt: skip
+        upfront = sum(d.terms.fixed_fee for d in gated if d.terms)
+        decision = interrupt({"campaign_id": state["campaign_id"], "deals": state["gated"], "total": str(total), "upfront": str(upfront),
+                              "network": f"zcash-{ctx.settings.zcash_network}", "direct": True})  # fmt: skip
         approved = bool(decision.get("approved")) if isinstance(decision, dict) else bool(decision)
         by = decision.get("by", "") if isinstance(decision, dict) else ""
         await deals.audit(state["campaign_id"], None, "human", "approval_decision", approved=approved, total=total, by=by)
         if approved:
-            return Command(goto="request_funding", update={"approved_by": by})
+            return Command(goto="request_payment", update={"approved_by": by})
         await deals.reject_agreements(state["campaign_id"], state["gated"], by)
         return Command(goto=END)
 
-    async def request_funding(state: AdvertiserState) -> AdvertiserState:
+    async def request_payment(state: AdvertiserState) -> AdvertiserState:
         try:
-            await deals.request_funding(state["campaign_id"], state["gated"], state.get("approved_by", ""))
-        except DealError as e:  # refused by the funding check: recorded, nothing is requested
-            log.warning("campaign %s: funding refused: %s", state["campaign_id"], e)
+            await deals.request_payment(state["campaign_id"], state["gated"], state.get("approved_by", ""))
+        except DealError as e:  # refused by a deterministic check: recorded, nothing is requested
+            log.warning("campaign %s: payment request refused: %s", state["campaign_id"], e)
             campaign = await deals.campaign(state["campaign_id"])
-            campaign.error = f"funding refused: {e}"
+            campaign.error = f"payment request refused: {e}"
             await deals.save_campaign(campaign)
         return {}
 
@@ -298,11 +299,11 @@ def build_advertiser_graph(deals: DealService, checkpointer: BaseCheckpointSaver
     g.add_node("discover", discover)
     g.add_node("negotiate_next", negotiate_next)
     g.add_node("prepare_payments", prepare_payments)
-    g.add_node("approval", approval, destinations=("request_funding", END))
-    g.add_node("request_funding", request_funding)
+    g.add_node("approval", approval, destinations=("request_payment", END))
+    g.add_node("request_payment", request_payment)
     g.add_edge(START, "discover")
     g.add_conditional_edges("discover", after_discover, ["negotiate_next", END])
     g.add_conditional_edges("negotiate_next", after_negotiation, ["negotiate_next", "prepare_payments"])
     g.add_conditional_edges("prepare_payments", needs_approval, ["approval", END])
-    g.add_edge("request_funding", END)
+    g.add_edge("request_payment", END)
     return g.compile(checkpointer=checkpointer)

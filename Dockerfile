@@ -1,5 +1,5 @@
 # Zerveil platform image: the React app built into the FastAPI server, one process (API, A2A agents, MCP, payment scanner).
-# The Zcash wallet (Zallet) is NOT in this image: in PAYMENT_MODE=zcash the app reaches it over JSON-RPC (ZCASH_WALLET_RPC_URL).
+# zcash-devtool is NOT in this image: PAYMENT_MODE=zcash needs it on PATH (ZCASH_DEVTOOL_BIN) and a private ZCASH_DEVTOOL_WALLET_DIR.
 # Render runs it with $PORT set; locally: docker build -t zerveil . && docker run --env-file .env -p 8000:8000 zerveil
 
 # ---- web app ---------------------------------------------------------------------------------------------------------

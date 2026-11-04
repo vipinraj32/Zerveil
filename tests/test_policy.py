@@ -1,4 +1,4 @@
-"""Deterministic policy: offers, signed terms (Ed25519 agent key + shielded payee), funding invoices, payouts."""
+"""Deterministic policy: offers, signed terms (Ed25519 agent key + shielded payee), milestone amounts, performance fees."""
 
 from decimal import Decimal
 
@@ -7,7 +7,7 @@ import pytest
 from tests.conftest import AGENT_KEY, TEST_SECRET, ua
 from zerveil.auth.crypto import delegation_mac, delegation_statement, delegation_valid, public_key_of, sign_text, verify_text
 from zerveil.models import requirements_hash
-from zerveil.policy import check_funding, check_offer, check_terms, needs_human_approval, performance_payout, sign_terms
+from zerveil.policy import check_milestone, check_offer, check_terms, needs_human_approval, performance_payout, sign_terms
 
 # --- offers --------------------------------------------------------------------------------------------------------
 
@@ -103,17 +103,17 @@ def test_delegation_binds_channel_agent_and_payout_address(identity):
     assert not valid(TEST_SECRET, other, delegation_mac(TEST_SECRET, p.delegation), p.channel_id, p.agent_signer, ua("new-address"))
 
 
-# --- funding and payouts -------------------------------------------------------------------------------------------------
+# --- milestones and performance -------------------------------------------------------------------------------------------------
 
 
-def test_funding_check(campaign):
-    caps, fee = [Decimal("40")] * 3, Decimal("0.0003")
-    assert check_funding(campaign, caps, fee, Decimal("120.0009"), Decimal("120")).ok
-    assert "invoice amount differs from the agreed caps plus fee reserve" in check_funding(campaign, caps, fee, Decimal("120"), Decimal("120")).violations
-    assert any("budget exceeded" in v for v in check_funding(campaign, caps, fee, Decimal("120.0009"), Decimal("121")).violations)
-    no_refund = campaign.model_copy(update={"refund_address": ""})
-    assert "the advertiser has no refund address for unspent escrow" in check_funding(no_refund, caps, fee, Decimal("120.0009"), Decimal("0")).violations
-    assert "no deals to fund" in check_funding(campaign, [], fee, Decimal("0"), Decimal("0")).violations
+def test_milestone_check(terms):
+    # terms: fixed 20, cap 40
+    assert check_milestone(terms, "fixed", Decimal("20")).ok
+    assert "fixed milestone 21 differs from the agreed fixed fee 20" in check_milestone(terms, "fixed", Decimal("21")).violations
+    assert check_milestone(terms, "performance", Decimal("20")).ok
+    assert "performance milestone 20.01 exceeds the cap left after the fixed fee" in check_milestone(terms, "performance", Decimal("20.01")).violations
+    assert "a milestone must request a positive amount" in check_milestone(terms, "performance", Decimal("0")).violations
+    assert "unknown milestone kind refund" in check_milestone(terms, "refund", Decimal("1")).violations
 
 
 def test_approval_and_performance(terms):

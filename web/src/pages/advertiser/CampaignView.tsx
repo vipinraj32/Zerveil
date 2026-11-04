@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useParams } from "react-router";
+import { Link, useParams } from "react-router";
 import { api } from "../../api";
 import { ComplianceCard, ReviewForm } from "../../components/Compliance";
 import { needsReview } from "../../components/ContentChecks";
@@ -7,32 +7,30 @@ import { ActivityChart, DevClock } from "../../components/CampaignPanels";
 import { LiveNegotiation } from "../../components/LiveNegotiation";
 import { NegotiationQueue, NegotiationSummary, useNegotiationQueue } from "../../components/NegotiationQueue";
 import { DealDetail } from "../../components/DealDetail";
-import { PayoutRequestsTable, PrivacyNote, ShieldedCheckout } from "../../components/Payments";
+import { CopyButton, InvoiceStatusChip, PrivacyNote, ShieldedCheckout, SimulatedChip, TestnetNotice } from "../../components/Payments";
+import { QrCode } from "../../components/QrCode";
 import { Requirements } from "../../components/Requirements";
 import { Timeline } from "../../components/Timeline";
 import { Breadcrumbs } from "../../components/Breadcrumbs";
 import { CreatorLink } from "../../components/CreatorLink";
 import { ActionButton, Avatar, CampaignBadge, Card, Empty, ErrorText, Notice, Spinner, StateBadge, Stat } from "../../components/ui";
-import { MODEL_LABEL, campaignName, humanize, zec } from "../../format";
+import { MILESTONE_KIND, MODEL_LABEL, OPEN_INVOICE, campaignName, humanize, zec } from "../../format";
 import { useLiveEvents, useResource } from "../../live";
 import { useMe, useSession } from "../../session";
-import type { CampaignDetail, CompensationModel, Deal, DirectoryEntry, NegotiationSession } from "../../types";
+import type { CampaignDetail, CampaignPayments, CompensationModel, Deal, DirectoryEntry, NegotiationSession, OwnerInvoice } from "../../types";
 import "./campaign.css";
 import "./dashboard.css";
 
-function spend(deals: Deal[]) {
-  const locked = deals.filter((d) => d.funded_at && d.terms).reduce((s, d) => s + Number(d.terms!.cap), 0);
-  const paid = deals.flatMap((d) => d.payouts).filter((p) => p.kind !== "refund").reduce((s, p) => s + Number(p.amount), 0);
-  const refunded = deals.flatMap((d) => d.payouts).filter((p) => p.kind === "refund").reduce((s, p) => s + Number(p.amount), 0);
-  return { locked, paid, refunded, inEscrow: locked - paid - refunded };
-}
+/** What the scanner confirmed in creators' wallets for one deal (confirmed milestones; legacy history for archived deals). */
+const paidFor = (d: Deal) =>
+  (d.milestones ?? []).filter((m) => m.status === "confirmed").reduce((t, m) => t + Number(m.amount), 0) +
+  d.payouts.filter((p) => p.kind !== "refund").reduce((t, p) => t + Number(p.amount), 0);
 
-/** Approve the agreed deals together: the backend then issues one shielded funding invoice for all of them. */
+/** Accept the agreed deals together: the backend then requests each creator's fixed fee as its own direct payment. */
 function ApprovalPanel({ campaign, deals, names, onDone }: { campaign: CampaignDetail; deals: Deal[]; names: Map<string, string>; onDone: () => void }) {
   const { status } = useSession();
   const pending = campaign.pending_approval!;
   const rows = pending.deals.map((id) => deals.find((d) => d.id === id)).filter((d): d is Deal => !!d);
-  const feeTotal = Number(pending.fee_reserve_per_deal) * pending.deals.length;
 
   async function decide(approved: boolean) {
     await api.decide(campaign.spec.id, approved);
@@ -43,20 +41,19 @@ function ApprovalPanel({ campaign, deals, names, onDone }: { campaign: CampaignD
     <div className="signing card tone-warn">
       <div className="signing-head">
         <h2>
-          Approve {pending.deals.length} deal{pending.deals.length > 1 ? "s" : ""} · {zec(pending.invoice_amount)}
+          Accept {pending.deals.length} deal{pending.deals.length > 1 ? "s" : ""} · {zec(pending.upfront)} upfront
         </h2>
         {status?.payments_simulated && (
           <span className="chip warn" title="Simulated payment mode: no ZEC moves">
-            Simulated payments
+            Simulated — no ZEC moved
           </span>
         )}
       </div>
 
       <div className="stats compact-stats">
-        <Stat label="Sum of deal caps" value={zec(pending.total)} hint="The most these deals can pay out; unused amounts are refunded" />
-        <Stat label="Fee reserve" value={zec(feeTotal)} hint={"Per deal, for network fees on payouts and refunds: " + zec(pending.fee_reserve_per_deal)} />
-        <Stat label="Invoice amount" value={zec(pending.invoice_amount)} />
-        <Stat label="Budget remaining" value={zec(campaign.funding.remaining)} />
+        <Stat label="Upfront (fixed fees)" value={zec(pending.upfront)} hint="Requested right after you accept: one direct payment to each creator's wallet" />
+        <Stat label="Most these deals can pay" value={zec(pending.total)} hint="Sum of the deal caps: fixed fee plus the most the performance fee can add" />
+        <Stat label="Budget remaining" value={zec(campaign.payments.remaining)} hint="The budget is a spending limit, not money held" />
       </div>
 
       {rows.length > 0 && (
@@ -87,42 +84,144 @@ function ApprovalPanel({ campaign, deals, names, onDone }: { campaign: CampaignD
       )}
 
       <div className="row">
-        <ActionButton onClick={() => decide(true)}>Approve &amp; create funding invoice</ActionButton>
+        <ActionButton onClick={() => decide(true)}>Accept &amp; request payments</ActionButton>
         <ActionButton variant="ghost" onClick={() => decide(false)}>
           Decline
         </ActionButton>
       </div>
 
       <details className="signing-more">
-        <summary>What happens when I approve?</summary>
+        <summary>What happens when I accept?</summary>
         <p className="small">
-          Zerveil creates one shielded Zcash invoice for all these deals: the sum of their caps plus a small fee reserve per deal. You pay it from any
-          Zcash wallet to a fresh shielded address with the invoice memo. Deals count as funded only after the escrow wallet sees the payment with{" "}
-          {status?.zcash.confirmations_required ?? 1}+ confirmations. Unused amounts are refunded to your refund address.
+          Each creator's fixed fee becomes its own shielded payment request to a fresh address of that creator's own wallet. You pay from your own Zcash
+          wallet, one by one or all at once with a multi-recipient ZIP-321 request. A payment counts only after Zerveil's view-only scanner sees it in the
+          creator's wallet with {status?.zcash.confirmations_required ?? 1}+ confirmations. The performance fee is computed from verified views at day 7
+          and requested the same way.
         </p>
-        <p className="small muted">Escrow is a wallet account operated by Zerveil, not a smart contract. Payouts follow deterministic rules and an operator approval.</p>
+        <p className="small muted">Zerveil never holds your money: it only requests payments and confirms they arrived.</p>
       </details>
     </div>
   );
 }
 
-function FundingCard({ campaign, onChange }: { campaign: CampaignDetail; onChange: () => void }) {
-  const invoice = campaign.funding_invoices[0];
-  if (!invoice) return null;
-  const paid = invoice.status === "paid";
+/** One milestone payment request: amount, creator, status with confirmations, address, memo, ZIP-321 link + QR, receipt. */
+function MilestoneInvoiceCard({ invoice, creator, kind, onChange }: { invoice: OwnerInvoice; creator: string; kind?: string; onChange: () => void }) {
   return (
-    <Card title={paid ? "Campaign funded" : "Fund the campaign"} className="funding-card">
-      {paid ? (
-        <p className="small">
-          The escrow wallet received {zec(invoice.amount)} with {invoice.confirmations}/{invoice.required_confirmations} confirmations
-          {invoice.paid_at ? " on " + new Date(invoice.paid_at).toLocaleString() : ""}.
-          {invoice.simulated && <span className="chip warn">simulated, no ZEC moved</span>}
-        </p>
-      ) : (
-        <ShieldedCheckout invoice={invoice} onChange={onChange} />
+    <div className="report-card milestone-invoice">
+      <ShieldedCheckout
+        invoice={invoice}
+        onChange={onChange}
+        receiptId={invoice.receipt_id}
+        title={
+          <>
+            {kind ? `${MILESTONE_KIND[kind] ?? kind} · ` : ""}
+            {creator}
+          </>
+        }
+      />
+    </div>
+  );
+}
+
+/** After acceptance: one card per creator milestone invoice, plus one "Pay all" ZIP-321 request for the open ones. */
+function CampaignPaymentsSection({
+  data,
+  deals,
+  name,
+  onChange,
+}: {
+  data: CampaignPayments;
+  deals: Deal[];
+  name: (creatorId: string) => string;
+  onChange: () => void;
+}) {
+  const [showClosed, setShowClosed] = useState(false);
+  if (data.invoices.length === 0) return null;
+  const kindOf = (inv: OwnerInvoice) => deals.flatMap((d) => d.milestones ?? []).find((m) => m.id === inv.milestone_id)?.kind;
+  const creatorOf = (inv: OwnerInvoice) => {
+    const deal = deals.find((d) => inv.deal_ids.includes(d.id));
+    return name(deal?.influencer_id ?? inv.recipient_id);
+  };
+  const open = data.invoices.filter((i) => OPEN_INVOICE.has(i.status));
+  const closed = data.invoices.filter((i) => !OPEN_INVOICE.has(i.status));
+  return (
+    <section className="report-card" aria-label="Creator payments">
+      <div className="report-toolbar">
+        <h2>Creator payments</h2>
+        <TestnetNotice inline />
+      </div>
+      <p className="muted small">
+        Each request pays one creator's own wallet directly. Creator addresses here are one-time addresses for this payment only.
+      </p>
+      {data.pay_all_uri && open.length > 1 && (
+        <div className="pay-all">
+          <div className="stack">
+            <h3>
+              Pay all {open.length} open requests · {zec(data.open_total)}
+            </h3>
+            <p className="small">
+              One ZIP-321 multi-recipient request: wallets that support it pay every creator in a single transaction. Each creator still receives their
+              own payment directly.
+            </p>
+            <div className="row">
+              <a className="btn btn-primary" href={data.pay_all_uri}>
+                Open in wallet
+              </a>
+              <CopyButton value={data.pay_all_uri} label="Copy payment URI" />
+            </div>
+          </div>
+          <QrCode value={data.pay_all_uri} label={`ZIP-321 request paying ${open.length} creators`} />
+        </div>
       )}
-      {campaign.funding_invoices.length > 1 && <p className="muted small">{campaign.funding_invoices.length - 1} earlier invoice(s) for this campaign.</p>}
-    </Card>
+      <div className="milestone-invoices">
+        {open.map((inv) => (
+          <MilestoneInvoiceCard key={inv.id} invoice={inv} creator={creatorOf(inv)} kind={kindOf(inv)} onChange={onChange} />
+        ))}
+      </div>
+      {closed.length > 0 && (
+        <>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => setShowClosed((v) => !v)}>
+            {showClosed ? "Hide" : "Show"} {closed.length} settled or closed request{closed.length > 1 ? "s" : ""}
+          </button>
+          {showClosed && (
+            <div className="table-scroll">
+              <table className="table compact pay-tx">
+                <thead>
+                  <tr>
+                    <th>Creator</th>
+                    <th>Milestone</th>
+                    <th>Amount</th>
+                    <th>Status</th>
+                    <th>Receipt</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {closed.map((inv) => (
+                    <tr key={inv.id}>
+                      <td>{creatorOf(inv)}</td>
+                      <td>{MILESTONE_KIND[kindOf(inv) ?? ""] ?? "—"}</td>
+                      <td>{zec(inv.amount)}</td>
+                      <td>
+                        <InvoiceStatusChip status={inv.status} /> <SimulatedChip simulated={inv.simulated} />
+                      </td>
+                      <td>
+                        {inv.receipt_id ? (
+                          <Link to={`/receipts/${encodeURIComponent(inv.receipt_id)}`} className="mono small">
+                            {inv.receipt_id}
+                          </Link>
+                        ) : (
+                          <span className="muted small">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
+    </section>
   );
 }
 
@@ -132,14 +231,14 @@ function DisputeForm({ dealId }: { dealId: string }) {
   if (!open)
     return (
       <button type="button" className="btn btn-danger" onClick={() => setOpen(true)}>
-        Dispute before release
+        Dispute the post
       </button>
     );
   return (
     <div className="row">
       <input className="grow" value={reason} onChange={(e) => setReason(e.target.value)} placeholder="What's wrong with the post?" maxLength={500} />
       <ActionButton variant="danger" disabled={reason.trim().length < 3} onClick={() => api.dispute(dealId, reason)}>
-        Freeze payout
+        Open dispute
       </ActionButton>
       <button type="button" className="btn btn-ghost" onClick={() => setOpen(false)}>
         Cancel
@@ -157,7 +256,7 @@ function Assistant() {
     <Card title="Ask the campaign assistant">
       <p className="muted small">It reads your campaigns through Zerveil's read-only MCP tools. It cannot move money.</p>
       <div className="row">
-        <input className="grow" value={q} onChange={(e) => setQ(e.target.value)} placeholder="How much is still in escrow? Why was Raj rejected?" maxLength={1000} />
+        <input className="grow" value={q} onChange={(e) => setQ(e.target.value)} placeholder="How much have I paid so far? Why was Raj rejected?" maxLength={1000} />
         <ActionButton
           disabled={q.trim().length < 2}
           onClick={async () => {
@@ -181,7 +280,7 @@ export function CampaignView() {
   useMe();
   const { status } = useSession();
   const campaign = useResource(() => api.campaign(id), `c:${id}`);
-  const payouts = useResource(() => api.campaignPayouts(id), `p:${id}`);
+  const payments = useResource(() => api.campaignPayments(id), `p:${id}`);
   const deals = useResource(() => api.campaignDeals(id), `d:${id}`);
   const events = useResource(() => api.campaignEvents(id), `e:${id}`);
   const directory = useResource(api.directory, "directory");
@@ -195,11 +294,11 @@ export function CampaignView() {
 
   const reloadAll = () => {
     void campaign.reload();
-    void payouts.reload();
+    void payments.reload();
     void deals.reload();
     void events.reload();
   };
-  useLiveEvents((e) => e.campaign_id === id || e.type === "invoice" || e.type === "payout", reloadAll);
+  useLiveEvents((e) => e.campaign_id === id || e.type === "invoice", reloadAll);
 
   const names = useMemo(() => new Map((directory.data ?? []).map((d: DirectoryEntry) => [d.id, d.name])), [directory.data]);
   const avatars = useMemo(() => new Map((directory.data ?? []).map((d: DirectoryEntry) => [d.id, d.avatar_url])), [directory.data]);
@@ -225,7 +324,6 @@ export function CampaignView() {
   if (campaign.error) return <ErrorText error={campaign.error} />;
   if (!campaign.data) return <Spinner />;
   const c = campaign.data;
-  const money = spend(list);
   const deal = list.find((d) => d.id === selected) ?? null;
   const sessions = queue.sessions;
   const started = sessions.filter((s) => s.started_at);
@@ -278,7 +376,8 @@ export function CampaignView() {
 
       {c.error && <Notice tone="bad">{c.error}</Notice>}
       {c.pending_approval && <ApprovalPanel campaign={c} deals={list} names={names} onDone={reloadAll} />}
-      {!c.pending_approval && <FundingCard campaign={c} onChange={reloadAll} />}
+      {!c.pending_approval && payments.data && <CampaignPaymentsSection data={payments.data} deals={list} name={creatorName} onChange={reloadAll} />}
+      {payments.error && <ErrorText error={payments.error} />}
       {!c.pending_approval && queue.progress && queue.progress.agreed_count > 0 && (working || queue.progress.workflow_status === "running") && (
         // Deals are approved once, for every agreed creator together, after the whole creator queue has finished
         <Notice>
@@ -287,7 +386,7 @@ export function CampaignView() {
               <strong>
                 {queue.progress.agreed_count} creator{queue.progress.agreed_count > 1 ? "s" : ""} agreed so far.
               </strong>{" "}
-              Nothing to approve yet: one funding invoice is prepared for all agreed creators together, after the remaining negotiations finish (
+              Nothing to accept yet: the agreed creators are put to you together, after the remaining negotiations finish (
               {queue.progress.completed_count} of {queue.progress.total_creators} done).
             </>
           ) : (
@@ -302,21 +401,20 @@ export function CampaignView() {
       <div className="report-grid">
         <div className="report-main">
           <section className="report-kpis" aria-label="Money">
-            <Stat label="Budget" value={zec(c.spec.budget)} />
-            <Stat label="Funded into escrow" value={zec(money.locked)} />
-            <Stat label="Paid to creators" value={zec(money.paid)} />
-            <Stat label="Refunded" value={zec(money.refunded)} />
-            <Stat label="Still locked" value={zec(money.inEscrow)} />
+            <Stat label="Budget" value={zec(c.payments.budget)} hint="A spending limit, not money held" />
+            <Stat label="Reserved" value={zec(c.payments.reserved)} hint="Caps of deals that may still be paid or were paid" />
+            <Stat label="Requested" value={zec(c.payments.requested)} hint="Payment requests open right now" />
+            <Stat label="Paid to creators" value={zec(c.payments.paid)} hint="Confirmed by the scanner in creators' wallets" />
+            <Stat label="Remaining" value={zec(c.payments.remaining)} />
           </section>
-          <p className="muted small escrow-where">
+          <p className="muted small payments-where">
             {status?.payments_simulated ? (
               <>
-                <span className="chip warn">simulated payments</span> no ZEC moves; invoices are paid with the dev simulate button.
+                <span className="chip warn">Simulated — no ZEC moved</span> payment requests are settled with the dev simulate button.
               </>
             ) : status ? (
               <>
-                <span className="chip good">Zcash {status.zcash.network}</span> shielded {status.zcash.ticker} held in the Zerveil-operated escrow wallet (not a
-                smart contract).
+                <span className="chip good">Zcash {status.zcash.network}</span> you pay each creator directly from your own wallet; Zerveil holds no funds.
               </>
             ) : null}
           </p>
@@ -362,7 +460,7 @@ export function CampaignView() {
                         <td className="num">{zec(d.terms?.cpm)}</td>
                         <td className="num">{zec(d.terms?.cap)}</td>
                         <td className="num">{d.rounds.length}</td>
-                        <td className="num">{zec(d.payouts.filter((p) => p.kind !== "refund").reduce((s, p) => s + Number(p.amount), 0))}</td>
+                        <td className="num">{zec(paidFor(d))}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -370,14 +468,6 @@ export function CampaignView() {
               </div>
             )}
           </section>
-
-          {(payouts.data?.length ?? 0) > 0 && (
-            <section className="report-card">
-              <h2>Payouts</h2>
-              <p className="muted small">Creator addresses stay private to the creator and the operator.</p>
-              <PayoutRequestsTable showDeal payouts={[...(payouts.data ?? [])].sort((a, b) => b.created_at.localeCompare(a.created_at))} />
-            </section>
-          )}
 
           {deal && (
             <DealDetail
@@ -402,7 +492,7 @@ export function CampaignView() {
             <Requirements deliverable={c.spec.deliverable} min={c.spec.min_duration_seconds} max={c.spec.max_duration_seconds} text={c.spec.requirements} />
           </Card>
 
-          <Card title="Privacy and custody">
+          <Card title="Privacy and payments">
             <PrivacyNote />
           </Card>
 

@@ -15,7 +15,7 @@ export function ProofForm({ deal, onDone }: { deal: InfluencerDeal; onDone: () =
   const [confirming, setConfirming] = useState(false); // submitting starts verification: ask once before it does
   const deadline = deal.terms?.publish_by;
   const late = deadline ? new Date(deadline).getTime() < Date.now() : false;
-  if (late) return <Notice tone="bad">The publish deadline ({when(deadline)}) has passed: no more submissions; the escrow refunds the advertiser.</Notice>;
+  if (late) return <Notice tone="bad">The publish deadline ({when(deadline)}) has passed: no more submissions; the deal closes as undelivered.</Notice>;
   const tags = deal.terms?.required_tags.join(" ") ?? "#ad";
   const rules = deal.terms?.disclosure_policies ?? [];
   return (
